@@ -256,7 +256,7 @@ export const TOOLS = [
     name: 'Claude Code',
     id: 'claude-code',
     dataDir: join(homedir(), '.claude', 'projects'),
-    detectDataDirs: findClaudeCodeDataDirs,
+    detectDataDirs: ({ extraRoots } = {}) => findClaudeCodeDataDirs(extraRootList(extraRoots?.claude)),
   },
   {
     name: 'Codex CLI',
@@ -303,6 +303,13 @@ export const TOOLS = [
     name: 'OpenCode',
     id: 'opencode',
     dataDir: join(homedir(), '.local', 'share', 'opencode'),
+    detectDataDirs: ({ extraRoots } = {}) => {
+      const paths = [join(homedir(), '.local', 'share', 'opencode')];
+      for (const root of extraRootList(extraRoots?.opencode)) {
+        if (!paths.includes(root)) paths.push(root);
+      }
+      return paths.filter(existsSync);
+    },
   },
   {
     name: 'OpenClaw',
@@ -411,6 +418,14 @@ export const TOOLS = [
     name: 'ZCode',
     id: 'zcode',
     dataDir: join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite'),
+    detectDataDirs: ({ extraRoots } = {}) => {
+      const paths = [join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite')];
+      for (const root of extraRootList(extraRoots?.zcode)) {
+        const candidate = join(root, 'cli', 'db', 'db.sqlite');
+        if (!paths.includes(candidate)) paths.push(candidate);
+      }
+      return paths.filter(existsSync);
+    },
   },
 ];
 

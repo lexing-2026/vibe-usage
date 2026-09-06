@@ -5,37 +5,72 @@ import { aggregateToBuckets, extractSessions } from './aggregate.js';
 import { queryDbJson, sqliteUnavailableError, isSqliteUnavailableError } from './sqlite.js';
 
 const DATA_DIR = join(homedir(), '.local', 'share', 'opencode');
-const DB_PATH = join(DATA_DIR, 'opencode.db');
 const MESSAGES_DIR = join(DATA_DIR, 'storage', 'message');
+
+/**
+ * Resolve all opencode DB paths: default + extras.
+ */
+function resolveDbPaths(extraRoots = []) {
+  const paths = [DATA_DIR];
+  for (const root of extraRoots) {
+    if (root && root !== DATA_DIR) paths.push(root);
+  }
+  return [...new Set(paths)];
+}
 
 /**
  * Parse opencode usage data.
  * Tries SQLite database first (opencode >= v0.2), falls back to legacy JSON files.
  */
-export async function parse() {
-  if (existsSync(DB_PATH)) {
-    try {
-      return parseFromSqlite();
-    } catch (err) {
-      process.stderr.write(`warn: opencode sqlite parse failed (${err.message}), trying legacy json...\n`);
+export async function parse({ extraRoots = [] } = {}) {
+  const dbPaths = resolveDbPaths(extraRoots);
+  const sqliteResults = [];
+  for (const dbDir of dbPaths) {
+    const dbPath = join(dbDir, 'opencode.db');
+    if (existsSync(dbPath)) {
+      try {
+        const result = parseFromSqlite(dbPath);
+        sqliteResults.push(result);
+      } catch (err) {
+        process.stderr.write(`warn: opencode sqlite parse failed (${dbPath}): ${err.message}, trying legacy json...\n`);
+      }
     }
+  }
+  if (sqliteResults.some(r => r.buckets.length > 0 || r.sessions.length > 0)) {
+    return mergeParseResults(sqliteResults);
   }
   return parseFromJson();
 }
 
-function parseFromSqlite() {
+function mergeParseResults(results) {
+  const buckets = [];
+  const sessions = [];
+  for (const r of results) {
+    buckets.push(...(r.buckets || []));
+    sessions.push(...(r.sessions || []));
+  }
+  return { buckets: aggregateToBuckets(buckets), sessions };
+}
+
+function parseFromSqlite(dbPath) {
   const query = `SELECT
     session_id as sessionID,
     json_extract(data, '$.role') as role,
     json_extract(data, '$.time.created') as created,
-    json_extract(data, '$.modelID') as modelID,
+    coalesce(
+      json_extract(data, '$.model.modelID'),
+      json_extract(data, '$.modelID')
+    ) as modelID,
     json_extract(data, '$.tokens') as tokens,
-    json_extract(data, '$.path.root') as rootPath
+    coalesce(
+      json_extract(data, '$.path.root'),
+      json_extract(data, '$.path.cwd')
+    ) as rootPath
     FROM message`;
 
   let rows;
   try {
-    rows = queryDbJson(DB_PATH, query);
+    rows = queryDbJson(dbPath, query);
   } catch (err) {
     if (isSqliteUnavailableError(err)) throw sqliteUnavailableError('OpenCode');
     throw err;
@@ -129,14 +164,14 @@ function parseFromJson() {
         role: data.role === 'user' ? 'user' : 'assistant',
       });
 
-      if (!data.modelID) continue;
+      if (!data.model?.modelID && !data.modelID) continue;
       const tokens = data.tokens;
       if (!tokens) continue;
       if (!tokens.input && !tokens.output) continue;
 
       entries.push({
         source: 'opencode',
-        model: data.modelID || 'unknown',
+        model: data.model?.modelID || data.modelID || 'unknown',
         project,
         timestamp,
         inputTokens: tokens.input || 0,

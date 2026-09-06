@@ -297,7 +297,7 @@ export async function run(rawArgs) {
     npx @vibe-cafe/vibe-usage config get <key>   Get a config value
     npx @vibe-cafe/vibe-usage config set <key> <value>  Set a config value
     npx @vibe-cafe/vibe-usage config set codexExtraHome <path>  Persist another Codex Home
-    npx @vibe-cafe/vibe-usage config add-root <tool> <path>  Add a Codex, Grok, Antigravity, or Pi data root
+    npx @vibe-cafe/vibe-usage config add-root <tool> <path>  Add a Codex, Claude, Grok, OpenCode, Antigravity, or Pi data root
     npx @vibe-cafe/vibe-usage config remove-root <tool> <path>  Remove an added data root
     npx @vibe-cafe/vibe-usage config roots  Show added data roots as JSON
     npx @vibe-cafe/vibe-usage help         Show this help

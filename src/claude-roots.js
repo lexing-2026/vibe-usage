@@ -106,7 +106,7 @@ export function findClaudeDesktopRoots(
  * VIBE_USAGE_CLAUDE_DIRS is a test/diagnostic override. It replaces all normal
  * and Desktop discovery with a path.delimiter-separated root list.
  */
-export function getClaudeRoots({ onWarning = () => {} } = {}) {
+export function getClaudeRoots({ onWarning = () => {}, extraRoots = [] } = {}) {
   const override = process.env.VIBE_USAGE_CLAUDE_DIRS?.trim();
   const roots = override
     ? override.split(delimiter).map(expandHome).filter(Boolean)
@@ -133,6 +133,11 @@ export function getClaudeRoots({ onWarning = () => {} } = {}) {
     }
   }
 
+  // Append explicit extra roots (e.g. another OS's .claude directory).
+  for (const root of extraRoots) {
+    if (root && !roots.includes(root)) roots.push(root);
+  }
+
   const seen = new Set();
   const unique = [];
   for (const root of roots) {
@@ -149,9 +154,9 @@ export function getClaudeRoots({ onWarning = () => {} } = {}) {
   return unique;
 }
 
-export function findClaudeCodeDataDirs() {
+export function findClaudeCodeDataDirs(extraRoots = []) {
   const dirs = [];
-  for (const root of getClaudeRoots()) {
+  for (const root of getClaudeRoots({ extraRoots })) {
     for (const name of ['projects', 'transcripts']) {
       const candidate = join(root, name);
       try {
