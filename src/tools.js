@@ -174,8 +174,7 @@ export function getMimocodeDbPath(env = process.env) {
 
 export function findAntigravityDataDirs(extraRoots = []) {
   return [...new Set([
-    join(homedir(), '.gemini', 'antigravity'),
-    join(homedir(), '.gemini', 'antigravity-cli'),
+    ...antigravityConversationDirs(homedir()).map(dirname),
     ...extraRoots.flatMap(root => antigravityConversationDirs(root).map(dirname)),
   ])].filter(existsSync);
 }

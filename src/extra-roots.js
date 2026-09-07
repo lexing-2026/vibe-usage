@@ -86,6 +86,7 @@ export function antigravityConversationDirs(value) {
   return [
     join(root, '.gemini', 'antigravity', 'conversations'),
     join(root, '.gemini', 'antigravity-cli', 'conversations'),
+    join(root, '.gemini', 'antigravity-ide', 'conversations'),
   ];
 }
 

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { aggregateToBuckets, extractSessions } from './aggregate.js';
+import { toCount } from './fs-utils.js';
 import { queryDbJson, sqliteUnavailableError, isSqliteUnavailableError } from './sqlite.js';
 
 const HERMES_HOME = process.env.HERMES_HOME || join(homedir(), '.hermes');
@@ -26,6 +27,8 @@ export async function parse() {
   for (const { path: dbPath, profile } of dbs) {
     let sessionRows;
     try {
+      const columns = new Set(queryDb(dbPath, 'PRAGMA table_info(sessions)').map(row => row.name));
+      const cacheWriteColumn = columns.has('cache_write_tokens') ? 'cache_write_tokens' : '0';
       sessionRows = queryDb(dbPath, `SELECT
         id,
         model,
@@ -33,9 +36,11 @@ export async function parse() {
         input_tokens as inputTokens,
         output_tokens as outputTokens,
         cache_read_tokens as cacheReadTokens,
+        ${cacheWriteColumn} as cacheWriteTokens,
         reasoning_tokens as reasoningTokens
         FROM sessions
-        WHERE input_tokens > 0 OR output_tokens > 0`);
+        WHERE input_tokens > 0 OR output_tokens > 0
+          OR cache_read_tokens > 0 OR ${cacheWriteColumn} > 0 OR reasoning_tokens > 0`);
     } catch (err) {
       if (isSqliteUnavailableError(err)) throw sqliteUnavailableError('Hermes');
       throw err;
@@ -47,15 +52,19 @@ export async function parse() {
       if (isNaN(timestamp.getTime())) continue;
 
       // Hermes stores input_tokens exclusive of cache (Anthropic-style semantics)
+      // and output_tokens inclusive of reasoning (CanonicalUsage.total_tokens
+      // adds prompt + output only). Split reasoning instead of counting it twice.
+      const output = toCount(row.outputTokens);
+      const reasoning = Math.min(output, toCount(row.reasoningTokens));
       entries.push({
         source: 'hermes',
         model: row.model || 'unknown',
         project: profile,
         timestamp,
-        inputTokens: row.inputTokens || 0,
-        outputTokens: row.outputTokens || 0,
-        cachedInputTokens: row.cacheReadTokens || 0,
-        reasoningOutputTokens: row.reasoningTokens || 0,
+        inputTokens: toCount(row.inputTokens) + toCount(row.cacheWriteTokens),
+        outputTokens: output - reasoning,
+        cachedInputTokens: toCount(row.cacheReadTokens),
+        reasoningOutputTokens: reasoning,
       });
     }
 

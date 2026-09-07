@@ -72,12 +72,12 @@ npx @vibe-cafe/vibe-usage status       # Show config & detected tools
 | Amp | `~/.local/share/amp/threads/`; cache-creation tokens are included in input usage |
 | Droid | `~/.factory/sessions/` |
 | DeepSeek Harness | `$DSH_HOME/sessions/` (default `~/.dsh`, fixture/relocation override: `VIBE_USAGE_DSH_SESSIONS`). Reads multi-frame Zstandard `session.jsonl.zstd` logs (built-in `node:zlib` zstd on Node ≥ 22.15, `zstd` CLI fallback) and plain `session.jsonl` logs. Usage comes from `assistant/message`: cache writes join uncached input, cache reads remain separate, and reasoning is split out of inclusive output. Fork/subagent history is de-duplicated from the immutable header: `parentSession` identifies the source and `seedLength` gives the exact leading event boundary. Inherited messages are skipped only when matching source seqs remain in the parent file; missing parents fail open. `session/end-seed` positions are not used because resumes can append the marker after real history. |
-| Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/<name>/state.db` (SQLite, multi-profile) |
+| Hermes | `$HERMES_HOME/state.db` (default `~/.hermes/state.db`) + `profiles/<name>/state.db` (SQLite, multi-profile). Cache writes join input; reasoning is separated from inclusive output. Usage is currently a cumulative session total attributed to session start: a session spanning several days does **not** yet provide an accurate daily breakdown. |
 | Kiro | Kiro CLI native event streams `~/.kiro/sessions/cli/*.jsonl` (estimated tokens from message text: input = prompt + tool results, output = reply + tool calls, reasoning = thinking, cacheRead = re-sent context; thinking-block signatures excluded). Falls back to `~/Library/Application Support/kiro-cli/data.sqlite3` / `~/.local/share/kiro-cli/data.sqlite3` + optional `~/.kiro_sessions/*.json` archives, then IDE `q-client.log` whole-credit deltas as `kiro-credits` (floored cumulative diff — the server stores token counts as bigint); legacy IDE `dev_data/devdata.sqlite` token telemetry is opt-in with `VIBE_USAGE_KIRO_LEGACY_TOKENS=1` |
 | Cline | Standalone `~/.cline/` plus `<host>/User/globalStorage/saoudrizwan.claude-dev/` across VSCode-fork hosts; migrated copies are deduplicated and empty leftover extension stores no longer count as installed |
 | Roo Code | `<host>/User/globalStorage/rooveterinaryinc.roo-cline/{tasks/_index.json,tasks/<id>/{history_item,ui_messages}.json}` (walks all VSCode-fork hosts) |
 | Trae CLI | macOS: `~/Library/Caches/trae-cli/sessions/`; Windows: `%LOCALAPPDATA%/trae-cli/cache/sessions/`; Linux: `~/.cache/trae-cli/sessions/` (CLI telemetry only; Trae IDE/Trae Work chats are not supported). Token usage is summed per unique LLM call (`model.stream.eino`, plus `model.generate` failovers); nested duplicate spans that share a session `traceID` are not max-merged. `traces.jsonl` / `events.jsonl` are streamed line-by-line so a multi-hundred-MB events file cannot hit Node's string-length limit. |
-| Antigravity | App 2.0 `~/.gemini/antigravity/conversations/*.db` and `agy` CLI `~/.gemini/antigravity-cli/conversations/*.db`, plus the same paths below explicitly added alternate Homes, are parsed offline (tokens, real model display name when present, project, sessions). Gemini 3.7 CLI blobs omit `chatStartMetadata.createdAt` and `modelDisplayName`; usage still comes from `gen_metadata`, timestamps fall back to `steps.metadata` at the same idx, and the model name falls back to `responseModel`. Legacy App `.pb` history falls back to Connect RPC only for the primary App store while the language server is running |
+| Antigravity | Scans App 2.0 `~/.gemini/antigravity/conversations/`, `agy` CLI `~/.gemini/antigravity-cli/conversations/`, and standalone IDE `~/.gemini/antigravity-ide/conversations/`. `.db` stores, including the same paths below explicitly added alternate Homes, are parsed offline (tokens, model, project, sessions). When Gemini blobs omit `chatStartMetadata.createdAt` or `modelDisplayName`, timestamps fall back to `steps.metadata` and model names to `responseModel`. `.pb` history in the default stores requires the corresponding App/IDE language server to be running; when several servers are open, the parser tries the others for unreadable conversations. Unavailable legacy history produces a warning and preserves prior sync state. |
 | WorkBuddy | Current releases: `~/.workbuddy-ai/projects/**/*.jsonl`; legacy releases: `~/.workbuddy/projects/**/*.jsonl` (fixture/relocation override: `VIBE_USAGE_WORKBUDDY_DIRS`). Reads usage-bearing completed assistant and `function_call` records, using the routed model identifier exposed as `providerData.requestModelId`. Splits cache reads and reasoning from inclusive input/output totals, deduplicates copied record IDs, and extracts local session timing without uploading message content. |
 | ZCode | `~/.zcode/cli/db/db.sqlite` (SQLite; reads the `message` table for per-message tokens, model, and project `cwd`/`root`, joined to `session.directory`) |
 
@@ -92,6 +92,24 @@ npx @vibe-cafe/vibe-usage status       # Show config & detected tools
 - The Codex parser cache contains derived aggregates and replay metadata, not raw prompt or response text. It is independent of upload state and can be deleted safely (the next sync rebuilds it). `reset` intentionally keeps it so the required full re-upload does not also require a full disk rescan. Set `VIBE_USAGE_CODEX_CACHE=0` to disable the optimization for diagnosis
 - SQLite-backed tools are read via Node's built-in `node:sqlite` on Node ≥ 22.5 — no `sqlite3` binary needed (works on Windows out of the box); on older Node the CLI falls back to the system `sqlite3` executable
 - For continuous syncing, use `npx @vibe-cafe/vibe-usage daemon` or the [Vibe Usage Mac app](https://github.com/vibe-cafe/vibe-usage-app)
+
+## Cursor 网络排查
+
+Cursor 用量需要从 `cursor.com` 下载 CSV。`Cursor usage export skipped (network: …)` 表示这次下载失败；CLI 会保留 Cursor 的历史同步状态，下次同步重新尝试。
+
+- `ENOTFOUND` / `EAI_AGAIN`：检查 DNS 和终端网络。
+- `UND_ERR_CONNECT_TIMEOUT` / `ETIMEDOUT` / `ECONNRESET`：检查到 Cursor 的连接及终端代理。浏览器或 Cursor 应用能联网，不代表 Node.js 使用了相同代理。
+- `CERT_*` / `UNABLE_TO_VERIFY_LEAF_SIGNATURE` 等：检查系统时间和代理或公司网络的 CA 证书配置；自定义 CA 可通过 `NODE_EXTRA_CA_CERTS` 指定。
+- `timeout after …ms`：导出或下载超时，稍后重试；网络较慢时可设置 `VIBE_USAGE_CURSOR_FETCH_TIMEOUT_MS=60000`。
+- `Cursor session rejected`：在 Cursor 的 Account 设置中重新登录，再同步。
+
+需要 HTTP/HTTPS 代理时，Node.js **22.21+ 或 24.5+** 可用 `NODE_USE_ENV_PROXY=1` 启用环境变量代理（[Node.js 官方说明](https://nodejs.org/en/learn/http/enterprise-network-configuration)）。以下为 macOS/Linux 终端示例，代理地址须替换为实际地址：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890 NODE_USE_ENV_PROXY=1 npx @vibe-cafe/vibe-usage sync
+```
+
+这些环境变量只影响当前命令；已经运行的桌面应用和后台服务有各自的进程环境。持续失败时，请提供完整的 Cursor 报错、操作系统、`node -v` 和 CLI 版本，以便区分具体原因。
 
 ## Trust Model
 
