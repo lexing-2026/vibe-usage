@@ -26,6 +26,7 @@ import { parse as parsePiCodingAgent } from './pi-coding-agent.js';
 import { parse as parseZcode } from './zcode.js';
 import { parse as parseTraeCli } from './trae-cli.js';
 import { parse as parseWorkbuddy } from './workbuddy.js';
+import { parseQoder, parseQoderCn } from './qoder.js';
 
 export const parsers = {
   'claude-code': parseClaudeCode,
@@ -40,6 +41,8 @@ export const parsers = {
   'openclaw': parseOpenclaw,
   'omp': parseOmp,
   'pi-coding-agent': parsePiCodingAgent,
+  'qoder': parseQoder,
+  'qoder-cn': parseQoderCn,
   'qwen-code': parseQwenCode,
   'kimi-code': parseKimiCode,
   'amp': parseAmp,
