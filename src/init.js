@@ -2,7 +2,7 @@ import { createInterface } from 'node:readline';
 import { execFile } from 'node:child_process';
 import { hostname as osHostname, platform } from 'node:os';
 import { loadConfig, saveConfig } from './config.js';
-import { ingest, requestDeviceCode, pollDeviceCode } from './api.js';
+import { fetchAccount, ingest, requestDeviceCode, pollDeviceCode } from './api.js';
 import { runSync } from './sync.js';
 import { detectInstalledTools } from './tools.js';
 import { bigHeader, success, failure, warn, arrow, link, dim, divider } from './output.js';
@@ -68,6 +68,13 @@ export async function runInit(options = {}) {
   try {
     await ingest(apiUrl, apiKey, []);
     console.log(success(`验证通过 ${dim(apiKey.slice(0, 12) + '...')}`));
+    // 说清楚数据会算在谁名下 —— 授权那一刻浏览器里登录的可能并不是他自己以为的
+    // 那个账号,而这是整条链路上最后一次能当场发现的机会。
+    const account = await fetchAccount(apiUrl, apiKey).catch(() => null);
+    if (account) {
+      console.log(success(`已链接到账号 ${account.name ? `@${account.handle}(${account.name})` : `@${account.handle}`}`));
+      console.log(dim('  数据都会记在这个账号名下;不是你要的账号就退出登录后重新 init。'));
+    }
   } catch (err) {
     if (err.message === 'UNAUTHORIZED') {
       console.error(failure('API Key 无效，请检查后重试。'));
