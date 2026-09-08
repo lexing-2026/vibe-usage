@@ -21,7 +21,8 @@ import { QODER_EDITIONS, getQoderProjectsDir, getQoderDbPath } from '../qoder-ro
  *    completion_tokens, max_input_tokens } and `model_info` JSON { model_key }.
  *    Real tokens (prompt_tokens INCLUDES cached_tokens), no credits. `model_key`
  *    is usually a routing tier ('auto', 'ultimate', 'performance', 'efficient',
- *    'lite') rather than a concrete model, so the server will mark it unmatched.
+ *    'lite') rather than a concrete model; tiers are reported as `qoder-<tier>`
+ *    so they stay unmatched server-side (see normalizeQoderModel).
  *    → token buckets + sessions.
  *
  * 2. JSONL transcripts (CLI + desktop app share them — the app embeds the CLI):
@@ -41,6 +42,19 @@ import { QODER_EDITIONS, getQoderProjectsDir, getQoderDbPath } from '../qoder-ro
 
 const DEFAULT_MODEL = 'qoder-agent';
 const MAX_WARNINGS = 10;
+
+// Qoder's routing tiers are not models. Left bare, `auto` collides with the
+// Cursor `auto` entry in the server pricing map and gets billed at Cursor's
+// rate, so tiers are namespaced (`qoder-auto`, …) — those never match a price
+// and render as unmatched, which is the truthful state. Concrete model keys
+// (`qmodel_38max`, …) are passed through unchanged.
+const ROUTING_TIERS = new Set(['auto', 'ultimate', 'performance', 'efficient', 'lite']);
+
+function normalizeQoderModel(key) {
+  const k = typeof key === 'string' ? key.trim() : '';
+  if (!k) return DEFAULT_MODEL;
+  return ROUTING_TIERS.has(k.toLowerCase()) ? `qoder-${k.toLowerCase()}` : k;
+}
 
 function toDate(value) {
   if (value == null || value === '') return null;
@@ -134,7 +148,7 @@ async function parseTranscriptFile(filePath, ctx) {
     const key = `${sessionId}|${message.id || record.uuid || `${filePath}:${usageByMessage.size}`}`;
     usageByMessage.set(key, {
       usage,
-      model: typeof message.model === 'string' && message.model.trim() ? message.model.trim() : DEFAULT_MODEL,
+      model: normalizeQoderModel(message.model),
       project,
       timestamp,
     });
@@ -247,7 +261,7 @@ function ideModel(row) {
   const info = parseJson(row.modelInfo);
   const preferred = parseJson(row.preferredModelInfo);
   const key = info?.model_key || info?.modelKey || preferred?.model_key || preferred?.modelKey;
-  return typeof key === 'string' && key.trim() ? key.trim() : DEFAULT_MODEL;
+  return normalizeQoderModel(key);
 }
 
 function parseIde(edition, ctx) {
