@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { gunzipSync } from 'node:zlib';
-import { encodeIngestBody, fetchSettings, retryDelayMs } from '../src/api.js';
+import { encodeIngestBody, fetchAccount, fetchSettings, retryDelayMs } from '../src/api.js';
 
 async function withServer(handler, run) {
   const server = createServer(handler);
@@ -93,4 +93,38 @@ test('fetchSettings does not retry an invalid API key', async () => {
     );
   });
   assert.equal(requests, 1);
+});
+
+test('fetchAccount names the account a key is bound to', async () => {
+  let seenPath = null;
+  const account = await withServer((req, res) => {
+    seenPath = req.url;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ account: { handle: 'milky2018', name: '布丁大魔王' }, buckets: [] }));
+  }, url => fetchAccount(url, 'vbu_test'));
+
+  assert.deepEqual(account, { handle: 'milky2018', name: '布丁大魔王' });
+  // Cheapest shape of the call: one day, aggregate only.
+  assert.equal(seenPath, '/api/usage?days=1&bucketsOnly=true');
+});
+
+test('fetchAccount stays null against an older backend or a transient failure', async () => {
+  const missingField = await withServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ buckets: [] }));
+  }, url => fetchAccount(url, 'vbu_test'));
+  assert.equal(missingField, null);
+
+  const serverError = await withServer((_req, res) => {
+    res.writeHead(500).end('boom');
+  }, url => fetchAccount(url, 'vbu_test'));
+  assert.equal(serverError, null);
+});
+
+test('fetchAccount still surfaces an invalid key', async () => {
+  await withServer((_req, res) => {
+    res.writeHead(401).end('nope');
+  }, async url => {
+    await assert.rejects(() => fetchAccount(url, 'vbu_bad'), /UNAUTHORIZED/);
+  });
 });

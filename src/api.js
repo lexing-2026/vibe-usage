@@ -281,6 +281,39 @@ export function getJson(apiUrl, apiKey, path, { timeoutMs = 15_000 } = {}) {
 }
 
 /**
+ * Which vibecafe account this API key is bound to.
+ *
+ * Exists because a key minted against the wrong account is otherwise invisible
+ * from the client side: ingest and this endpoint both answer 200 for it, so the
+ * user sees a healthy CLI and a healthy desktop app while their uploads pile up
+ * on an account they never look at. Ask the backend whose data it is and say so.
+ *
+ * Returns null when the backend is too old to send `account`, or on any
+ * transient failure — identity is a nicety, never a reason to fail a command.
+ * UNAUTHORIZED still propagates: that one the caller must not swallow.
+ *
+ * @param {string} apiUrl
+ * @param {string} apiKey
+ * @returns {Promise<{handle: string, name: string | null} | null>}
+ */
+export async function fetchAccount(apiUrl, apiKey) {
+  let data;
+  try {
+    // bucketsOnly keeps the response to the aggregate we throw away; days=1
+    // keeps the window (and the scan) small.
+    data = await getJson(apiUrl, apiKey, '/api/usage?days=1&bucketsOnly=true', { timeoutMs: 10_000 });
+  } catch (err) {
+    if (err.message === 'UNAUTHORIZED') throw err;
+    return null;
+  }
+  const account = data?.account;
+  if (account && typeof account.handle === 'string') {
+    return { handle: account.handle, name: account.name ?? null };
+  }
+  return null;
+}
+
+/**
  * GET user settings from the vibecafe API.
  * Returns null after transient failures are exhausted. A 401 remains distinct
  * so callers can surface invalid credentials instead of calling it an outage.

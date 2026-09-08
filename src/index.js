@@ -8,7 +8,8 @@ import {
   normalizeExtraRoot,
   validateExtraRoot,
 } from './extra-roots.js';
-import { failure, smallHeader } from './output.js';
+import { dim as dimText, failure, smallHeader, warn } from './output.js';
+import { fetchAccount } from './api.js';
 
 function printSmallHeader() {
   console.log();
@@ -27,6 +28,8 @@ async function showStatus() {
     console.log(`  Config: ${getConfigPath()}`);
     console.log(`  API key: ${config.apiKey.slice(0, 8)}...`);
     console.log(`  API URL: ${config.apiUrl || 'https://vibecafe.ai'}`);
+    // 数据算在谁名下,是这里最该回答、以前偏偏答不出的一件事。
+    await printBoundAccount(config.apiUrl || 'https://vibecafe.ai', config.apiKey);
     if (config.codexExtraHome) {
       console.log(`  Extra Codex Home: ${config.codexExtraHome}`);
     }
@@ -60,6 +63,30 @@ async function showStatus() {
     console.log(`    ${tool.name}: ${installed}`);
   }
   console.log();
+}
+
+/**
+ * Print the account this key uploads to. Never throws: an offline machine or an
+ * older backend just means we cannot name the account, which must not make
+ * `status` fail — but a revoked/invalid key is worth saying out loud.
+ */
+async function printBoundAccount(apiUrl, apiKey) {
+  try {
+    const account = await fetchAccount(apiUrl, apiKey);
+    if (account) {
+      const label = account.name ? `@${account.handle}(${account.name})` : `@${account.handle}`;
+      console.log(`  账号: ${label}`);
+      console.log(dimText(`        数据都记在这个账号名下,不是它就换个账号重新 init`));
+    } else {
+      console.log(dimText('  账号: 服务端未返回(后端版本较旧或网络异常)'));
+    }
+  } catch (err) {
+    if (err.message === 'UNAUTHORIZED') {
+      console.log(warn('账号: Key 已失效,请重新运行 `npx @vibe-cafe/vibe-usage init`'));
+      return;
+    }
+    console.log(dimText('  账号: 读取失败'));
+  }
 }
 
 const VALID_CONFIG_KEYS = ['apiKey', 'apiUrl', 'hostname', 'codexExtraHome'];
