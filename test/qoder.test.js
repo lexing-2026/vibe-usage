@@ -211,7 +211,8 @@ test('qoder: transcript token fields are counted when a build reports them, once
       assert.equal(result.buckets.length, 1);
       const b = result.buckets[0];
       assert.equal(b.source, 'qoder');
-      assert.equal(b.model, 'efficient');
+      // Routing tiers are namespaced so they never collide with a priced model id.
+      assert.equal(b.model, 'qoder-efficient');
       assert.equal(b.project, 'demo-app');
       assert.equal(b.inputTokens, 1200 + 300);
       assert.equal(b.cachedInputTokens, 9500);
@@ -248,7 +249,8 @@ test('qoder: IDE local.db yields real tokens with cached input split out', { ski
       assert.equal(result.buckets.length, 1);
       const b = result.buckets[0];
       assert.equal(b.source, 'qoder');
-      assert.equal(b.model, 'auto');
+      // `auto` bare would match the Cursor `auto` pricing entry; namespaced instead.
+      assert.equal(b.model, 'qoder-auto');
       assert.equal(b.project, 'ide demo');
       assert.equal(b.inputTokens, (16340 - 0) + (18756 - 16334));
       assert.equal(b.cachedInputTokens, 0 + 16334);
