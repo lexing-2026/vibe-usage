@@ -13,6 +13,7 @@ import {
 import { findClineDataDirs } from './cline-roots.js';
 import { findCraftDataDirs } from './craft-roots.js';
 import { findOmpDataDirs, findPiDataDirs } from './pi-roots.js';
+import { findQoderDataDirs, getQoderProjectsDir } from './qoder-roots.js';
 import { findWorkbuddyDataDirs } from './workbuddy-roots.js';
 
 export function getAlmaDbPath(env = process.env, platform = process.platform, home = homedir()) {
@@ -323,6 +324,20 @@ export const TOOLS = [
     detectDataDirs: ({ extraRoots } = {}) => (
       findPiDataDirs(extraRootList(extraRoots?.['pi-coding-agent']))
     ),
+  },
+  {
+    name: 'Qoder',
+    id: 'qoder',
+    // CLI + desktop app transcripts; the IDE's SharedClientCache/cache/db/local.db
+    // is detected too. `~/.qoder` alone is not proof (the IDE stores extensions there).
+    dataDir: getQoderProjectsDir('qoder'),
+    detectDataDirs: () => findQoderDataDirs('qoder'),
+  },
+  {
+    name: 'Qoder CN',
+    id: 'qoder-cn',
+    dataDir: getQoderProjectsDir('qoder-cn'),
+    detectDataDirs: () => findQoderDataDirs('qoder-cn'),
   },
   {
     name: 'Qwen Code',
