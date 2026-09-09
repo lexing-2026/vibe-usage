@@ -249,19 +249,41 @@ Test hooks (env vars honored at module load, set them before importing):
 - Published as `@vibe-cafe/vibe-usage` on npm
 - Users run via `npx @vibe-cafe/vibe-usage`
 
-### Publishing with 2FA on the account (2026-09-09, three failed attempts)
+### Publishing with 2FA on the account
 
+**Do not pipe `npm publish`.** With webauthn/passkey 2FA the CLI opens a browser and
+polls for approval, but it only does that when stdout is a TTY. Behind a pipe it skips
+the browser step and fails `EOTP` instead — asking for a code the account does not have.
+Three releases were burned on this before the pipe itself was suspected; the wrapper
+added *to observe the failure* was the failure.
+
+```bash
+# Wrong: tee makes stdout a pipe, npm never opens the browser
+npm publish --access public 2>&1 | tee publish.log
+
+# Right: script(1) keeps a pty and still captures everything
+script -q publish.log npm publish --access public
+```
+
+- **`EOTP`'s wording lies.** "requires a one-time password from your authenticator" is a
+  generic message; it does not mean a TOTP app is enrolled. Ask which second factor the
+  account actually has instead of inferring one from the error, and do not reach for
+  `--otp=` on a passkey-only account.
 - **`npm whoami` returning a username is not proof you can publish.** A stored token
-  authenticates the account but does not satisfy two-factor; `npm publish` then fails
-  `EOTP` after packing, which reads like a packaging problem and is not one.
-- **`npm login --auth-type=web` is a separate network path and can fail on its own.**
-  It posts to `registry.npmjs.org/-/v1/login`; that endpoint returned `ECONNRESET`
-  while `publish` reached the registry fine in the same minute. **A login failure is not
-  evidence that the registry is unreachable** — the proof that the publish path works is
-  a well-formed `EOTP` response coming back from it.
-- **The path that works when 2FA is enabled: `npm publish --access public --otp=<6 digits>`**,
-  reading the code from the authenticator app. It skips the login endpoint entirely.
-- **Verify by unpacking what was published, not by the exit code.** `npm pack
-  @vibe-cafe/vibe-usage@<version> --prefer-online`, untar, and grep the shipped `src/`
-  for the change. `npm view <pkg> version` without `--prefer-online` reads a local cache
-  and will happily report the previous version as current.
+  authenticates the account without satisfying 2FA, and the EOTP lands *after* npm has
+  packed the tarball, so it reads like a packaging failure.
+- **`npm login --auth-type=web` can fail on its own.** Its `/-/v1/login` endpoint has
+  returned `ECONNRESET` while `publish` reached the registry fine in the same minute —
+  and when it fails **no browser opens at all**, which looks like the human forgot to
+  click. A login failure says nothing about registry reachability.
+- **A successful publish is async: `PUT 202` + "Your package is being processed".**
+  `npm view` and the version endpoint (`/<pkg>/<version>` → 404) keep showing the old
+  release for a few minutes. Exit code 0 with `info ok` in `~/.npm/_logs/` is the real
+  signal; a `202` is acceptance, not failure.
+- **Those log filenames are UTC** (`2026-09-09T17_16_54_269Z`). Convert before deciding a
+  log is stale — a success two minutes old reads as eight hours old at UTC+8.
+- **Verify by unpacking what was published**, never by the exit code alone:
+  `npm pack @vibe-cafe/vibe-usage@<version> --prefer-online`, untar, grep the shipped
+  `src/`. `npm view` without `--prefer-online` reads a local cache and reports the
+  previous version as current.
+
