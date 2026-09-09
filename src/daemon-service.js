@@ -1,12 +1,16 @@
 import { execFileSync } from 'node:child_process';
 import { writeFileSync, readFileSync, unlinkSync, mkdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname, win32 as winPath } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { success, failure, warn, dim } from './output.js';
 
 const SERVICE_NAME = 'vibe-usage';
 const LAUNCHD_LABEL = 'ai.vibecafe.vibe-usage';
+// Same specifier the Mac app resolves on every sync (vibe-usage-app
+// RuntimeDetector.swift): a service that runs this instead of a pinned bin
+// path survives npx cache cleanup and picks up new releases at each login.
+export const PACKAGE_SPEC = '@vibe-cafe/vibe-usage@latest';
 
 function detectPlatform() {
   const os = platform();
@@ -23,16 +27,45 @@ function detectPlatform() {
   return null;
 }
 
+// npx cache paths are unstable — a service pinned to one breaks when the
+// cache is cleared. POSIX: ~/.npm/_npx/<hash>/...; Windows:
+// %LocalAppData%\npm-cache\_npx\...
+export function isNpxCachePath(binPath) {
+  return /[\\/]_npx[\\/]/.test(binPath);
+}
+
+/**
+ * When the CLI itself came from the npx cache, the service should not pin
+ * that path; it should re-resolve the package through npx at every start.
+ * Returns null when no npx lives next to the running node (then the caller
+ * falls back to pinning the path and warning, as before).
+ */
+export function npxLauncher(nodePath, exists = existsSync, os = platform()) {
+  const nodeDir = dirname(nodePath);
+  const npxPath = join(nodeDir, os === 'win32' ? 'npx.cmd' : 'npx');
+  return exists(npxPath) ? { mode: 'npx', npxPath, nodeDir } : null;
+}
+
 function resolvePaths() {
   const nodePath = process.execPath;
   const thisFile = fileURLToPath(import.meta.url);
   const binPath = join(thisFile, '..', '..', 'bin', 'vibe-usage.js');
+  const isNpxCache = isNpxCachePath(binPath);
+  const launcher = isNpxCache ? npxLauncher(nodePath) : null;
+  return { nodePath, binPath, isNpxCache, launcher };
+}
 
-  // npx cache paths are unstable — service will break when cache is cleared.
-  // POSIX: ~/.npm/_npx/<hash>/...; Windows: %LocalAppData%\npm-cache\_npx\...
-  const isNpxCache = /[\\/]_npx[\\/]/.test(binPath);
+// argv the service runs; the last token is always `daemon` so process
+// matching and log greps keep working across both modes.
+function serviceArgv(nodePath, binPath, launcher) {
+  if (launcher?.mode === 'npx') return [launcher.npxPath, '--yes', PACKAGE_SPEC, 'daemon'];
+  return [nodePath, binPath, 'daemon'];
+}
 
-  return { nodePath, binPath, isNpxCache };
+// npx is a `#!/usr/bin/env node` script and launchd / systemd start services
+// with a minimal PATH that has no node on it.
+function servicePath(launcher) {
+  return [launcher.nodeDir, '/usr/local/bin', '/usr/bin', '/bin'].join(':');
 }
 
 function getServicePaths(plat) {
@@ -103,21 +136,26 @@ export function generateSystemdUnit(
   binPath,
   claudeConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim(),
   env = process.env,
+  launcher = null,
 ) {
+  const npx = launcher?.mode === 'npx';
+  const pathLine = npx ? `Environment="PATH=${escapeSystemdEnvironment(servicePath(launcher))}"\n` : '';
   const environment = serviceEnvironment(claudeConfigDir, env)
     .map(([key, value]) => `Environment="${key}=${escapeSystemdEnvironment(value)}"\n`)
     .join('');
+  // npx mode needs the registry at start; RestartSec=60 keeps an offline boot
+  // from turning into a restart storm.
   return `[Unit]
 Description=VibeCafe Usage Tracker
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${nodePath} ${binPath} daemon
+ExecStart=${serviceArgv(nodePath, binPath, launcher).join(' ')}
 Restart=on-failure
-RestartSec=10
+RestartSec=${npx ? 60 : 10}
 Environment=NODE_ENV=production
-${environment}WorkingDirectory=${homedir()}
+${pathLine}${environment}WorkingDirectory=${homedir()}
 
 [Install]
 WantedBy=default.target
@@ -129,11 +167,22 @@ export function generateLaunchdPlist(
   binPath,
   claudeConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim(),
   env = process.env,
+  launcher = null,
 ) {
+  const npx = launcher?.mode === 'npx';
   const logDir = join(homedir(), '.vibe-usage');
+  const programArguments = serviceArgv(nodePath, binPath, launcher)
+    .map(arg => `        <string>${escapeXml(arg)}</string>\n`)
+    .join('');
+  const pathEntry = npx
+    ? `        <key>PATH</key>\n        <string>${escapeXml(servicePath(launcher))}</string>\n`
+    : '';
   const environment = serviceEnvironment(claudeConfigDir, env)
     .map(([key, value]) => `        <key>${key}</key>\n        <string>${escapeXml(value)}</string>\n`)
     .join('');
+  // ThrottleInterval only matters in npx mode: an offline boot makes npx exit
+  // non-zero and KeepAlive would otherwise relaunch it every 10 seconds.
+  const throttle = npx ? `    <key>ThrottleInterval</key>\n    <integer>60</integer>\n` : '';
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -142,15 +191,12 @@ export function generateLaunchdPlist(
     <string>${LAUNCHD_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${nodePath}</string>
-        <string>${binPath}</string>
-        <string>daemon</string>
-    </array>
+${programArguments}    </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>WorkingDirectory</key>
+${throttle}    <key>WorkingDirectory</key>
     <string>${homedir()}</string>
     <key>StandardOutPath</key>
     <string>${join(logDir, 'daemon.log')}</string>
@@ -160,7 +206,7 @@ export function generateLaunchdPlist(
     <dict>
         <key>NODE_ENV</key>
         <string>production</string>
-${environment}    </dict>
+${pathEntry}${environment}    </dict>
 </dict>
 </plist>
 `;
@@ -171,6 +217,7 @@ export function generateWindowsTaskCmd(
   binPath,
   claudeConfigDir = process.env.CLAUDE_CONFIG_DIR?.trim(),
   env = process.env,
+  launcher = null,
 ) {
   const logPath = join(homedir(), '.vibe-usage', 'daemon.log');
   const lines = [
@@ -178,12 +225,17 @@ export function generateWindowsTaskCmd(
     'rem Generated by `vibe-usage daemon install` - reinstalling overwrites this file',
     'set "NODE_ENV=production"',
   ];
+  if (launcher?.mode === 'npx') {
+    // npx.cmd re-launches node by name; the logon task's PATH may not have it.
+    lines.push(`set "PATH=${escapeCmdValue(launcher.nodeDir)};%PATH%"`);
+  }
   for (const [key, value] of serviceEnvironment(claudeConfigDir, env)) {
     lines.push(`set "${key}=${escapeCmdValue(value)}"`);
   }
-  lines.push(
-    `"${escapeCmdValue(nodePath)}" "${escapeCmdValue(binPath)}" daemon >> "${escapeCmdValue(logPath)}" 2>&1`,
-  );
+  const invocation = launcher?.mode === 'npx'
+    ? `"${escapeCmdValue(launcher.npxPath)}" --yes ${PACKAGE_SPEC} daemon`
+    : `"${escapeCmdValue(nodePath)}" "${escapeCmdValue(binPath)}" daemon`;
+  lines.push(`${invocation} >> "${escapeCmdValue(logPath)}" 2>&1`);
   return lines.join('\r\n') + '\r\n';
 }
 
@@ -300,13 +352,26 @@ function windowsUserId() {
 // invocation. Process matching uses both paths so it works for Node and Bun
 // without touching foreground daemons from another checkout.
 export function parseWindowsTaskInvocation(cmd) {
-  const match = cmd.match(/^"([^"]+)" "([^"]+)" daemon\b/m);
-  if (!match) return null;
   const unescapeCmdValue = value => value.replace(/%%/g, '%');
-  return {
-    runtimePath: unescapeCmdValue(match[1]),
-    binPath: unescapeCmdValue(match[2]),
-  };
+  const pinned = cmd.match(/^"([^"]+)" "([^"]+)" daemon\b/m);
+  if (pinned) {
+    return {
+      runtimePath: unescapeCmdValue(pinned[1]),
+      binPath: unescapeCmdValue(pinned[2]),
+    };
+  }
+  // npx mode: the live daemon is node.exe (next to npx.cmd) running the
+  // cached bin, whose path we cannot know in advance — match on the bin name.
+  const npx = cmd.match(/^"([^"]+)" --yes @vibe-cafe\/vibe-usage@\S+ daemon\b/m);
+  if (npx) {
+    const npxPath = unescapeCmdValue(npx[1]);
+    return {
+      runtimePath: winPath.join(winPath.dirname(npxPath), 'node.exe'),
+      binPath: 'vibe-usage.js',
+      mode: 'npx',
+    };
+  }
+  return null;
 }
 
 function readTaskInvocation(paths) {
@@ -336,6 +401,36 @@ function daemonProcessKillLines(invocation) {
     : [];
 }
 
+export function isDaemonPlatform() {
+  return detectPlatform() !== null;
+}
+
+// A leftover daemon-task.xml without a registration (crashed uninstall) must
+// not block a fresh install, so Task Scheduler checks the live task instead.
+export function isDaemonInstalled() {
+  const plat = detectPlatform();
+  if (!plat) return false;
+  const paths = getServicePaths(plat);
+  return plat === 'taskscheduler' ? taskExists() : existsSync(paths.file);
+}
+
+// How an installed service starts the daemon, read back from the unit itself
+// so `status` tells the truth about machines set up by older versions. The
+// plist splits argv into separate <string> elements, so look for the package
+// spec alone: a pinned bin path contains `@vibe-cafe/vibe-usage/bin`, never
+// `@latest`.
+export function installedModeFromText(text) {
+  return text.includes(PACKAGE_SPEC) ? 'npx' : 'pinned';
+}
+
+export function describeInstalledMode(plat, paths) {
+  try {
+    return installedModeFromText(readFileSync(plat === 'taskscheduler' ? paths.cmd : paths.file, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
 function install() {
   const plat = detectPlatform();
   if (!plat) {
@@ -344,20 +439,17 @@ function install() {
     return;
   }
 
-  const { nodePath, binPath, isNpxCache } = resolvePaths();
+  const { nodePath, binPath, isNpxCache, launcher } = resolvePaths();
 
-  if (isNpxCache) {
-    console.log(warn('检测到从 npx 缓存运行 vibe-usage,缓存清理后 daemon 会失效。'));
+  if (isNpxCache && !launcher) {
+    console.log(warn('检测到从 npx 缓存运行 vibe-usage 且找不到 npx,缓存清理后 daemon 会失效。'));
     console.log(dim('  建议先全局安装:  npm install -g @vibe-cafe/vibe-usage'));
     console.log();
   }
 
   const paths = getServicePaths(plat);
 
-  // A leftover daemon-task.xml without a registration (crashed uninstall) must
-  // not block a fresh install, so Task Scheduler checks the live task instead
-  const alreadyInstalled = plat === 'taskscheduler' ? taskExists() : existsSync(paths.file);
-  if (alreadyInstalled) {
+  if (isDaemonInstalled()) {
     console.log(warn('Daemon 已安装，运行 `vibe-usage daemon restart` 或 `uninstall` 先处理。'));
     return;
   }
@@ -365,7 +457,7 @@ function install() {
   mkdirSync(paths.dir, { recursive: true });
 
   if (plat === 'systemd') {
-    writeFileSync(paths.file, generateSystemdUnit(nodePath, binPath), 'utf-8');
+    writeFileSync(paths.file, generateSystemdUnit(nodePath, binPath, undefined, process.env, launcher), 'utf-8');
     console.log(dim(`  已写入 ${paths.file}`));
 
     run('systemctl', ['--user', 'daemon-reload']);
@@ -379,7 +471,7 @@ function install() {
 
   if (plat === 'launchd') {
     mkdirSync(join(homedir(), '.vibe-usage'), { recursive: true });
-    writeFileSync(paths.file, generateLaunchdPlist(nodePath, binPath), 'utf-8');
+    writeFileSync(paths.file, generateLaunchdPlist(nodePath, binPath, undefined, process.env, launcher), 'utf-8');
     console.log(dim(`  已写入 ${paths.file}`));
 
     const result = run('launchctl', ['load', paths.file]);
@@ -402,7 +494,7 @@ function install() {
       'wscript.exe',
     );
 
-    writeFileSync(paths.cmd, generateWindowsTaskCmd(nodePath, binPath), 'utf-8');
+    writeFileSync(paths.cmd, generateWindowsTaskCmd(nodePath, binPath, undefined, process.env, launcher), 'utf-8');
     writeFileSync(paths.vbs, generateWindowsTaskVbs(paths.cmd), 'utf-8');
     writeFileSync(paths.file, generateWindowsTaskXml(userId, wscriptPath, paths.vbs), 'utf-8');
     console.log(dim(`  已写入 ${paths.file}`));
@@ -421,8 +513,11 @@ function install() {
   }
 
   console.log();
-  console.log(success('Daemon 已安装，用量数据将每 30 分钟自动同步。'));
-  console.log(dim('  运行 `vibe-usage daemon status` 查看状态。'));
+  console.log(success('已开启后台自动同步（每 30 分钟一次，登录自启）。'));
+  if (launcher?.mode === 'npx') {
+    console.log(dim('  服务通过 npx 启动，每次登录自动使用最新版。'));
+  }
+  console.log(dim('  关闭: npx @vibe-cafe/vibe-usage daemon uninstall'));
 }
 
 function uninstall() {
@@ -484,12 +579,19 @@ function status() {
 
   const paths = getServicePaths(plat);
 
+  const printMode = () => {
+    const mode = describeInstalledMode(plat, paths);
+    if (mode === 'npx') console.log(dim(`  运行方式: npx ${PACKAGE_SPEC}（每次登录自动更新）`));
+    else if (mode === 'pinned') console.log(dim('  运行方式: 固定路径（升级后需 daemon uninstall 再重跑一条命令）'));
+  };
+
   if (plat === 'taskscheduler') {
     if (!taskExists()) {
       console.log(dim('未安装 daemon 服务。'));
       console.log(dim('  运行 `vibe-usage daemon install` 安装。'));
       return;
     }
+    printMode();
     const invocation = readTaskInvocation(paths);
     const processExpression = windowsDaemonProcessExpression(invocation);
     const scriptLines = [
@@ -546,6 +648,7 @@ function status() {
     console.log(dim('  运行 `vibe-usage daemon install` 安装。'));
     return;
   }
+  printMode();
 
   if (plat === 'systemd') {
     const result = run('systemctl', ['--user', 'status', `${SERVICE_NAME}.service`]);
