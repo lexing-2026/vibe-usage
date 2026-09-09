@@ -48,15 +48,18 @@ function networkError(code) {
 test('Cursor fetch timeout accepts positive integers and defaults invalid values', () => {
   assert.equal(typeof cursor.resolveCursorFetchTimeout, 'function');
 
+  // The default has to clear a slow full-account export: 10s and 30s each
+  // locked heavy accounts out of every sync (issue #72 and its sequel).
   const cases = [
-    [undefined, 30_000],
-    ['', 30_000],
-    ['0', 30_000],
-    ['-1', 30_000],
-    ['1.5', 30_000],
-    ['Infinity', 30_000],
-    ['2147483648', 30_000],
+    [undefined, 120_000],
+    ['', 120_000],
+    ['0', 120_000],
+    ['-1', 120_000],
+    ['1.5', 120_000],
+    ['Infinity', 120_000],
+    ['2147483648', 120_000],
     ['45000', 45_000],
+    ['300000', 300_000],
   ];
 
   for (const [value, expected] of cases) {

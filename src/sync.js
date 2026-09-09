@@ -21,12 +21,6 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-/** Hide only Cursor's intentional transient fetch soft-skip in quiet (daemon) syncs. */
-export function shouldSuppressParserWarning(source, message, quiet) {
-  if (!quiet) return false;
-  return source === 'cursor' && message.startsWith('cursor: Cursor usage export skipped (');
-}
-
 export function resolveUploadProjectSetting(settings) {
   if (typeof settings?.uploadProject !== 'boolean') {
     const error = new Error('SETTINGS_UNAVAILABLE');
@@ -184,13 +178,17 @@ export async function runSync({
     if (indexing) {
       parserProgress.push({ source, ...indexing });
     }
+    // Parser warnings always reach stderr, including quiet (daemon) runs: the
+    // daemon log is the only trail a background failure leaves. Cursor's fetch
+    // soft-skip used to be filtered out here to keep that log tidy, which made
+    // a permanently failing export indistinguishable from a healthy one -- the
+    // tool still listed as "installed" while it had never uploaded a byte.
     for (const message of warnings) {
-      if (shouldSuppressParserWarning(source, message, quiet)) continue;
       process.stderr.write(`${dim(`  ${message}`)}\n`);
     }
-    // A parser may deliberately suppress a transient error (Cursor network
-    // timeout) to keep daemon logs quiet. Its empty result is not proof that
-    // its prior data disappeared, so it must not be pruned this run.
+    // A parser may downgrade a transient error (Cursor network timeout) to a
+    // warning instead of throwing. Its empty result is not proof that its prior
+    // data disappeared, so it must not be pruned this run.
     if (!skipped) okSources.add(source);
     for (const bucket of buckets) allBuckets.push(bucket);
     for (const session of sessions) allSessions.push(session);

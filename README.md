@@ -111,7 +111,7 @@ Cursor 用量需要从 `cursor.com` 下载 CSV。`Cursor usage export skipped (n
 - `ENOTFOUND` / `EAI_AGAIN`：检查 DNS 和终端网络。
 - `UND_ERR_CONNECT_TIMEOUT` / `ETIMEDOUT` / `ECONNRESET`：检查到 Cursor 的连接及终端代理。浏览器或 Cursor 应用能联网，不代表 Node.js 使用了相同代理。
 - `CERT_*` / `UNABLE_TO_VERIFY_LEAF_SIGNATURE` 等：检查系统时间和代理或公司网络的 CA 证书配置；自定义 CA 可通过 `NODE_EXTRA_CA_CERTS` 指定。
-- `timeout after …ms`：导出或下载超时，稍后重试；网络较慢时可设置 `VIBE_USAGE_CURSOR_FETCH_TIMEOUT_MS=60000`。
+- `timeout after …ms`：导出超时。`cursor.com` 的导出是按整个账号现算的，**账号用量越大越慢**，所以重度用户会每次都超时、而不是偶尔。默认等待 120 秒；仍不够就调大，例如 `VIBE_USAGE_CURSOR_FETCH_TIMEOUT_MS=300000`，然后重跑一次 `sync` 补传历史。
 - `Cursor session rejected`：在 Cursor 的 Account 设置中重新登录，再同步。
 
 需要 HTTP/HTTPS 代理时，Node.js **22.21+ 或 24.5+** 可用 `NODE_USE_ENV_PROXY=1` 启用环境变量代理（[Node.js 官方说明](https://nodejs.org/en/learn/http/enterprise-network-configuration)）。以下为 macOS/Linux 终端示例，代理地址须替换为实际地址：
