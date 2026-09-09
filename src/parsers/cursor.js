@@ -68,9 +68,15 @@ function decodeJwtSub(token) {
   }
 }
 
-// Under full sync many parsers hammer disk concurrently; cursor.com's CSV
-// export can still succeed but take >10s. A short timeout caused silent skips.
-const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// cursor.com's CSV export is computed over the whole account, so it gets
+// slower the more usage the account has: heavy users time out on every run,
+// not intermittently. 10s (v0.7.11) and then 30s (#72) were both still short
+// enough to lock those accounts out permanently -- a user with ~13B tokens/30d
+// needed 120s to complete a single export, and every default-timeout run of
+// his silently uploaded nothing. Budget for the slow accounts; a healthy
+// export returns in a second or two, so this ceiling only costs wall-clock
+// time on the runs that were failing anyway.
+const DEFAULT_FETCH_TIMEOUT_MS = 120_000;
 const MAX_FETCH_TIMEOUT_MS = 2_147_483_647;
 
 export function resolveCursorFetchTimeout(value) {
