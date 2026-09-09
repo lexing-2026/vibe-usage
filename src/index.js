@@ -8,7 +8,7 @@ import {
   normalizeExtraRoot,
   validateExtraRoot,
 } from './extra-roots.js';
-import { dim as dimText, failure, smallHeader, warn } from './output.js';
+import { dim as dimText, failure, hint, smallHeader, warn } from './output.js';
 import { fetchAccount } from './api.js';
 
 function printSmallHeader() {
@@ -23,7 +23,7 @@ async function showStatus() {
 
   if (!config?.apiKey) {
     console.log('  Config: not configured');
-    console.log(`  Run \`npx @vibe-cafe/vibe-usage init\` to set up.\n`);
+    console.log(`  Run \`npx @vibe-cafe/vibe-usage\` to set up.\n`);
   } else {
     console.log(`  Config: ${getConfigPath()}`);
     console.log(`  API key: ${config.apiKey.slice(0, 8)}...`);
@@ -213,6 +213,69 @@ function extractOption(args, name) {
   return { args: [...args.slice(0, idx), ...args.slice(idx + 2)], value };
 }
 
+// Boolean global flag: present anywhere in argv → true, removed from args.
+function extractFlag(args, name) {
+  const flag = `--${name}`;
+  const idx = args.findIndex(a => a === flag);
+  if (idx === -1) return { args, value: false };
+  return { args: [...args.slice(0, idx), ...args.slice(idx + 1)], value: true };
+}
+
+const BARE = 'npx @vibe-cafe/vibe-usage';
+
+// The one command we advertise. Everything else stays supported (see
+// `help --all`) but the default help must not read like a matrix.
+const SHORT_HELP = `
+  vibe-usage - Vibe Usage Tracker by VibeCafé
+
+  用法:
+    ${BARE}
+        首次运行: 浏览器登录 → 同步 → 自动开启后台同步(每 30 分钟一次)
+        之后运行: 手动同步一次
+
+  常用:
+    ${BARE} daemon status      查看后台同步
+    ${BARE} daemon uninstall   关闭后台同步
+    ${BARE} summary [--days N] 最近 N 天用量(默认 7)
+    ${BARE} help --all         全部命令与选项
+
+  旧命令(sync、init、daemon install …)仍可用，见 help --all。
+`;
+
+const FULL_HELP = `
+  vibe-usage - Vibe Usage Tracker by VibeCafé
+
+  Usage:
+    ${BARE}              Init (first run, browser login, then background sync) or sync
+    ${BARE} --no-daemon  Same, but do not install the background service on first run
+    ${BARE} init         Set up via browser login (default)
+    ${BARE} init --manual-key <vbu_...>   Skip browser, use a pre-issued key (CI/headless)
+    ${BARE} sync         Manually sync usage data
+    ${BARE} sync --extra-codex-home <path>  Use another Codex Home for this run
+    ${BARE} summary       Print last 7 days as markdown (cost/tokens/model/project)
+    ${BARE} summary --days N   Same, but over the last N days (1-90)
+    ${BARE} daemon       Continuous sync (every 30m, foreground)
+    ${BARE} daemon install    Install background service (systemd/launchd/Task Scheduler)
+    ${BARE} daemon uninstall  Remove background service
+    ${BARE} daemon status     Show background service status
+    ${BARE} daemon stop       Stop background service
+    ${BARE} daemon restart    Restart background service
+    ${BARE} reset        Delete all data and re-upload
+    ${BARE} reset --local  Delete data for this host only and re-upload (--host is a legacy alias)
+    ${BARE} skill         Install skill for AI coding tools
+    ${BARE} skill --remove  Remove installed skills
+    ${BARE} status       Show config and detected tools
+    ${BARE} config show  Show full config as JSON
+    ${BARE} config get <key>   Get a config value
+    ${BARE} config set <key> <value>  Set a config value
+    ${BARE} config set codexExtraHome <path>  Persist another Codex Home
+    ${BARE} config add-root <tool> <path>  Add a Codex, Grok, Antigravity, or Pi data root
+    ${BARE} config remove-root <tool> <path>  Remove an added data root
+    ${BARE} config roots  Show added data roots as JSON
+    ${BARE} help         Show the short help
+    ${BARE} help --all   Show this full list
+`;
+
 export async function run(rawArgs) {
   // --key and --manual-key both mean "skip device flow, take this vbu_ key".
   // --manual-key is the documented name; --key is kept as a legacy alias so
@@ -222,7 +285,10 @@ export async function run(rawArgs) {
   ({ args: stripped, value: apiKey } = extractOption(rawArgs, 'manual-key'));
   if (apiKey === undefined) {
     ({ args: stripped, value: apiKey } = extractOption(stripped, 'key'));
+    if (apiKey !== undefined) hint('--key 已改名 --manual-key，旧写法仍可用');
   }
+  let noDaemon;
+  ({ args: stripped, value: noDaemon } = extractFlag(stripped, 'no-daemon'));
   let codexExtraHome;
   ({ args: stripped, value: codexExtraHome } = extractOption(stripped, 'extra-codex-home'));
   if (codexExtraHome !== undefined) {
@@ -239,14 +305,19 @@ export async function run(rawArgs) {
 
   switch (command) {
     case 'init': {
+      // Re-running init on a configured machine is the account re-bind path;
+      // only a genuine first setup gets nudged toward the bare command.
+      const firstSetup = !loadConfig()?.apiKey;
       const { runInit } = await import('./init.js');
-      await runInit({ apiKey, codexExtraHome });
+      await runInit({ apiKey, codexExtraHome, noDaemon });
+      if (firstSetup) hint(`以后直接运行 ${BARE} 即可：首次登录，之后同步`);
       break;
     }
     case 'sync': {
       printSmallHeader();
       const { runSync } = await import('./sync.js');
       await runSync({ codexExtraHome });
+      hint(`以后直接运行 ${BARE} 就是同步，不用再加 sync`);
       break;
     }
     case 'summary': {
@@ -256,15 +327,18 @@ export async function run(rawArgs) {
     }
     case 'reset': {
       printSmallHeader();
+      if (args.includes('--host')) hint('reset --host 已改名 reset --local，旧写法仍可用');
       const { runReset } = await import('./reset.js');
       await runReset(args.slice(1));
       break;
     }
     case 'daemon':
     case '--daemon': {
+      if (command === '--daemon') hint('--daemon 已改名 daemon，旧写法仍可用');
       const sub = args[1];
       if (sub === undefined) {
         // Foreground daemon loop — no header, just start syncing
+        hint(`首次运行 ${BARE} 会自动开启后台同步，不用手动跑 daemon`);
         const { runDaemon } = await import('./daemon.js');
         await runDaemon({ codexExtraHome });
       } else {
@@ -278,6 +352,7 @@ export async function run(rawArgs) {
         printSmallHeader();
         const { manageDaemon } = await import('./daemon-service.js');
         await manageDaemon(sub);
+        if (sub === 'install') hint(`首次运行 ${BARE} 会自动开启后台同步，不用单独装`);
       }
       break;
     }
@@ -298,37 +373,7 @@ export async function run(rawArgs) {
     case 'help':
     case '--help':
     case '-h': {
-      console.log(`
-  vibe-usage - Vibe Usage Tracker by VibeCafé
-
-  Usage:
-    npx @vibe-cafe/vibe-usage              Init (first run, browser login) or sync
-    npx @vibe-cafe/vibe-usage init         Set up via browser login (default)
-    npx @vibe-cafe/vibe-usage init --manual-key <vbu_...>   Skip browser, use a pre-issued key (CI/headless)
-    npx @vibe-cafe/vibe-usage sync         Manually sync usage data
-    npx @vibe-cafe/vibe-usage sync --extra-codex-home <path>  Use another Codex Home for this run
-    npx @vibe-cafe/vibe-usage summary       Print last 7 days as markdown (cost/tokens/model/project)
-    npx @vibe-cafe/vibe-usage summary --days N   Same, but over the last N days (1-90)
-    npx @vibe-cafe/vibe-usage daemon       Continuous sync (every 30m, foreground)
-    npx @vibe-cafe/vibe-usage daemon install    Install background service (systemd/launchd/Task Scheduler)
-    npx @vibe-cafe/vibe-usage daemon uninstall  Remove background service
-    npx @vibe-cafe/vibe-usage daemon status     Show background service status
-    npx @vibe-cafe/vibe-usage daemon stop       Stop background service
-    npx @vibe-cafe/vibe-usage daemon restart    Restart background service
-    npx @vibe-cafe/vibe-usage reset        Delete all data and re-upload
-    npx @vibe-cafe/vibe-usage reset --local  Delete data for this host only and re-upload (--host is a legacy alias)
-    npx @vibe-cafe/vibe-usage skill         Install skill for AI coding tools
-    npx @vibe-cafe/vibe-usage skill --remove  Remove installed skills
-    npx @vibe-cafe/vibe-usage status       Show config and detected tools
-    npx @vibe-cafe/vibe-usage config show  Show full config as JSON
-    npx @vibe-cafe/vibe-usage config get <key>   Get a config value
-    npx @vibe-cafe/vibe-usage config set <key> <value>  Set a config value
-    npx @vibe-cafe/vibe-usage config set codexExtraHome <path>  Persist another Codex Home
-    npx @vibe-cafe/vibe-usage config add-root <tool> <path>  Add a Codex, Grok, Antigravity, or Pi data root
-    npx @vibe-cafe/vibe-usage config remove-root <tool> <path>  Remove an added data root
-    npx @vibe-cafe/vibe-usage config roots  Show added data roots as JSON
-    npx @vibe-cafe/vibe-usage help         Show this help
-`);
+      console.log(args.includes('--all') ? FULL_HELP : SHORT_HELP);
       break;
     }
     case undefined: {
@@ -338,7 +383,7 @@ export async function run(rawArgs) {
       if (!config?.apiKey || apiKey) {
         // First run OR user passed --key for a one-shot setup — init.js prints the big header
         const { runInit } = await import('./init.js');
-        await runInit({ apiKey, codexExtraHome });
+        await runInit({ apiKey, codexExtraHome, noDaemon });
       } else {
         // Already configured: small header + sync
         printSmallHeader();

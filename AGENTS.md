@@ -8,7 +8,7 @@ AI agent guidance for the vibe-usage CLI. See [README.md](./README.md) for user-
 vibe-usage/
 ├── bin/vibe-usage.js          # CLI entry point → src/index.js
 ├── src/
-│   ├── index.js               # Command router (init, sync, daemon, reset, skill, status, config)
+│   ├── index.js               # Command router (init, sync, summary, daemon, reset, skill, status, config, help); short help by default, `help --all` for the full list; legacy spellings print a TTY-only hint
 │   ├── parsers/               # One parser per tool, all export async parse() → { buckets, sessions }
 │   │   ├── index.js           # Parser registry
 │   │   ├── aggregate.js       # aggregateToBuckets() / extractSessions() (kept out of index.js to avoid the registry import cycle)
@@ -54,12 +54,12 @@ vibe-usage/
 │   ├── api.js                 # HTTP client: ingest() (always gzip), requestDeviceCode()/pollDeviceCode() (device flow), deleteAllData(), fetchSettings()
 │   ├── summary.js             # `summary --days N`: GET /api/usage with the saved vbu_ key, render markdown (cost / tokens / by-model / by-project). Powers the SKILL.md "查询用量" entries.
 │   ├── config.js              # ~/.vibe-usage/config.json (dev: config.dev.json)
-│   ├── init.js                # Setup flow (device-flow browser login by default; --manual-key for CI/headless, verify, initial sync, daemon install prompt)
+│   ├── init.js                # Setup flow (device-flow browser login by default; --manual-key for CI/headless, verify, initial sync, then installs the background service unless --no-daemon / non-TTY)
 │   ├── daemon.js              # 30-minute sync loop (foreground)
-│   ├── daemon-service.js      # Background service management (systemd/launchd/Task Scheduler install/uninstall/status)
+│   ├── daemon-service.js      # Background service management (systemd/launchd/Task Scheduler install/uninstall/status); npx-cache runs register `npx --yes @vibe-cafe/vibe-usage@latest daemon`, global/checkout runs pin the bin path
 │   ├── reset.js               # Delete remote data + clearState() + re-sync (clearing state is what makes the re-sync re-upload)
 │   ├── skill.js               # Install/remove SKILL.md for AI coding tools
-│   └── output.js              # Terminal output helpers: colors, OSC 8 links, big/small headers
+│   └── output.js              # Terminal output helpers: colors, OSC 8 links, big/small headers, hint() (TTY-only advisory line)
 ├── SKILL.md                   # Skill definition (also used by `npx skills add`)
 └── package.json               # @vibe-cafe/vibe-usage, ESM, Node >=20 (≥22.5 enables built-in node:sqlite), zero dependencies
 ```
@@ -102,6 +102,17 @@ from issue #49 without architecture approval; v0.10.16 fully reverted it. Do
 not reintroduce any part as a "compatibility" or "small privacy" fix without
 passing this gate.
 
+**Approved 2026-09-09 by the maintainer (江昪), shipped in v0.10.25 — one-command onboarding.**
+
+| | |
+|---|---|
+| Previous invariant | First run on a TTY asked `开启后台自动同步？[Y/n]` (default Y); the service pinned `node <bin> daemon`; an npx-cache run only warned that the path would break. |
+| Current invariant | First run on a TTY installs the background service without asking; `--no-daemon` opts out; non-TTY runs never install. When the CLI runs from the npx cache and an `npx` exists next to `process.execPath`, the service is registered as `npx --yes @vibe-cafe/vibe-usage@latest daemon` (PATH pinned to that node dir; launchd `ThrottleInterval` 60 / systemd `RestartSec` 60 so an offline boot cannot restart-storm). Global installs and checkouts still pin the bin path. |
+| Affected | New installs and re-runs of `init`; vibe-cafe-web copy (one advertised command); VibeFriends knowledge base 话术. Mac/Windows apps call `sync` / `config` and are unaffected. |
+| Compatibility | No command or flag renamed or removed. Existing plists / units / scheduled tasks are untouched; `daemon status` reports `npx` vs pinned. Switching an old pinned-cache service: `daemon uninstall`, then the bare command once. |
+| Release ordering | CLI 0.10.25 on the registry first, then the website copy that promises auto background sync, then knowledge-base wording. |
+| Rollback | Web: revert the copy PR. CLI: publish a version that restores the prompt; already-installed npx-mode services keep working since they always resolve `@latest`. |
+
 ## Key Conventions
 
 - **Pure ESM** (`"type": "module"`) — no CommonJS, no build step
@@ -115,7 +126,7 @@ passing this gate.
 - **Upload identity** — `client-meta.js` reads the real package version from the shipped `package.json`, creates one `syncId` per `runSync`, and adds batch identity plus runtime/platform/hostname to every ingest request. Direct sync defaults to `surface=cli`, the foreground service passes `surface=daemon`, and desktop apps override via `VIBE_USAGE_SURFACE` / `VIBE_USAGE_SURFACE_VERSION`. Keep the CLI as the only ingest HTTP implementation.
 - **No TypeScript** — plain JavaScript throughout
 - **Output style** — user-facing text is Chinese (colored via `output.js` helpers: `success` / `failure` / `warn` / `arrow` / `link`). Dashboard URLs use OSC 8 hyperlinks so terminals that support it (iTerm2, Warp, VSCode, Kitty, Terminal.app 14+) render them as clickable. Raw pass-through from external tools (parser errors, `systemctl` / `launchctl` output, daemon loop timestamps) is kept in English and dimmed so it's visually de-emphasized. `init` prints a big ASCII logo; other commands print a compact one-line header (`bigHeader()` / `smallHeader()` from `output.js`).
-- **CLI compatibility** — keep the documented legacy aliases `--key` (for `--manual-key`), `--daemon` (for `daemon`), and `reset --host` (for `reset --local`). The bare invocation remains init-or-sync. Do not preserve arbitrary unknown-command fallthrough; it was never a public command and can turn typos into unintended side effects.
+- **CLI compatibility** — keep the documented legacy aliases `--key` (for `--manual-key`), `--daemon` (for `daemon`), and `reset --host` (for `reset --local`). The bare invocation remains init-or-sync, and since v0.10.25 the only command we advertise; every other subcommand stays supported. `--no-daemon` and `help --all` are public flags. Old spellings (`sync`, `daemon install`, the aliases above) print a one-line `hint()` pointing at the simpler form — **TTY-only**: the Mac and Windows apps read the CLI's piped stdout as the sync result / error text, so never print hints to a pipe. Do not preserve arbitrary unknown-command fallthrough; it was never a public command and can turn typos into unintended side effects.
 
 ## Architecture: Two-Track Data Model
 

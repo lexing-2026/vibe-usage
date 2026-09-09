@@ -6,7 +6,7 @@ export async function runSummary(args = []) {
   const days = parseDays(args);
   const config = loadConfig();
   if (!config?.apiKey) {
-    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage init`。'));
+    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage`。'));
     process.exit(1);
   }
 
@@ -42,7 +42,7 @@ function render(data, days, apiUrl) {
   const dashboard = `${apiUrl}/usage`;
 
   if (buckets.length === 0) {
-    return `# Vibe Usage Summary (Last ${days} ${days === 1 ? 'day' : 'days'})\n\n暂无数据。运行 \`npx @vibe-cafe/vibe-usage sync\` 上传本地 token 记录。\n\n详情: ${dashboard}\n`;
+    return `# Vibe Usage Summary (Last ${days} ${days === 1 ? 'day' : 'days'})\n\n暂无数据。运行 \`npx @vibe-cafe/vibe-usage\` 上传本地 token 记录。\n\n详情: ${dashboard}\n`;
   }
 
   let totalCost = 0;

@@ -134,10 +134,49 @@ test('daemon service commands require manual persistence instead of ignoring a t
   }
 });
 
-test('help documents the extra Codex home option', () => {
-  const result = run('--help');
+test('help --all documents the extra Codex home option', () => {
+  const result = run('help', '--all');
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /--extra-codex-home <path>/);
+  assert.match(result.stdout, /--no-daemon/);
+});
+
+test('default help advertises the bare command and hides the command matrix', () => {
+  const result = run('--help');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /npx @vibe-cafe\/vibe-usage\n/);
+  assert.match(result.stdout, /help --all/);
+  assert.doesNotMatch(result.stdout, /daemon restart/);
+  assert.doesNotMatch(result.stdout, /--extra-codex-home/);
+});
+
+test('--no-daemon is accepted as a global flag', () => {
+  const result = run('--no-daemon', '--help');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /vibe-usage - Vibe Usage Tracker/);
+});
+
+test('legacy --key prints a rename hint only when a human is watching', () => {
+  // spawnSync pipes stdout, exactly how the desktop apps run the CLI: no hint.
+  const piped = run('--key', 'vbu_compat_test', '--help');
+  assert.equal(piped.status, 0, piped.stderr);
+  assert.doesNotMatch(piped.stdout, /提示:/);
+
+  const forced = runWithEnv(['--key', 'vbu_compat_test', '--help'], { VIBE_USAGE_FORCE_HINTS: '1' });
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stdout, /提示: --key 已改名 --manual-key/);
+});
+
+test('unconfigured sync points at the bare command, not init', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-cli-unconfigured-'));
+  try {
+    const result = runWithEnv(['sync'], { VIBE_USAGE_CONFIG_DIR: root });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /请先运行 `npx @vibe-cafe\/vibe-usage`。/);
+    assert.doesNotMatch(result.stderr, /vibe-usage init/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('status displays the persisted extra Codex home and detects Codex there', () => {

@@ -4,31 +4,37 @@ Track your AI coding tool token usage and sync to [vibecafe.ai](https://vibecafe
 
 ## Quick Start
 
+One command, nothing to configure:
+
 ```bash
 npx @vibe-cafe/vibe-usage
 ```
 
-That's it. The CLI opens [vibecafe.ai/usage/device](https://vibecafe.ai/usage/device) in your browser; sign in, confirm the verification code shown in your terminal, click 「确认链接」, and the CLI receives an API key automatically.
+On the first run it:
+1. Opens [vibecafe.ai/usage/device](https://vibecafe.ai/usage/device) in your browser — sign in, confirm the code shown in the terminal, click 「确认链接」; the key is saved to `~/.vibe-usage/config.json`
+2. Detects the AI coding tools installed on this machine
+3. Uploads your usage history
+4. Turns on background sync (every 30 minutes, starts at login) — no prompt, nothing else to install
 
-After approval, it will:
-1. Save your API key to `~/.vibe-usage/config.json`
-2. Detect installed AI coding tools
-3. Run an initial sync of your usage data
-4. Prompt you to enable the background daemon for continuous syncing (recommended)
+Run the same command again any time to sync right now. To turn background sync off: `npx @vibe-cafe/vibe-usage daemon uninstall`. Add `--no-daemon` to the first run if you don't want the background service at all.
+
+Prefer a menu-bar app? [Vibe Usage for Mac](https://github.com/vibe-cafe/vibe-usage-app) · [for Windows](https://github.com/vibe-cafe/vibe-usage-windows).
 
 ### CI / Headless
 
-If you don't have a local browser (CI, remote SSH session, container), pre-issue a key at [vibecafe.ai/usage/setup](https://vibecafe.ai/usage/setup) and pass it on the command line:
+If you don't have a local browser (CI, remote SSH session, container), pre-issue a key at [vibecafe.ai/usage/setup](https://vibecafe.ai/usage/setup) and pass it on the command line. Non-interactive runs never install the background service:
 
 ```bash
-npx @vibe-cafe/vibe-usage init --manual-key vbu_xxxxxxxxxxxx
+npx @vibe-cafe/vibe-usage init --manual-key vbu_xxxxxxxxxxxx --no-daemon
 ```
 
-## Commands
+<details>
+<summary><strong>All commands</strong> — everything below still works; the older spellings print a hint pointing at the simpler form</summary>
 
 ```bash
-npx @vibe-cafe/vibe-usage              # Init (first run, browser login) or sync (subsequent runs)
-npx @vibe-cafe/vibe-usage init         # Re-run setup via browser login
+npx @vibe-cafe/vibe-usage              # Init (first run, browser login, then background sync) or sync (subsequent runs)
+npx @vibe-cafe/vibe-usage --no-daemon  # Same, but skip installing the background service on first run
+npx @vibe-cafe/vibe-usage init         # Re-run setup via browser login (also how you re-bind to another account)
 npx @vibe-cafe/vibe-usage init --manual-key <vbu_...>   # Skip browser, use pre-issued key (CI/headless)
 npx @vibe-cafe/vibe-usage sync         # Manual sync
 npx @vibe-cafe/vibe-usage sync --extra-codex-home /path/to/.codex  # Add another Codex Home for this run only
@@ -45,7 +51,10 @@ npx @vibe-cafe/vibe-usage reset --local  # Delete this host's data only and re-u
 npx @vibe-cafe/vibe-usage skill         # Install skill for AI coding assistants
 npx @vibe-cafe/vibe-usage skill --remove  # Remove installed skills
 npx @vibe-cafe/vibe-usage status       # Show config & detected tools
+npx @vibe-cafe/vibe-usage help --all   # Full help (plain `help` shows the short version)
 ```
+
+</details>
 
 ## Supported Tools
 
@@ -93,7 +102,7 @@ npx @vibe-cafe/vibe-usage status       # Show config & detected tools
 - Incremental Codex parsing: a versioned, disposable cache under `~/.vibe-usage/cache/codex/` stores per-rollout aggregate results and parser continuation state. Unchanged rollouts require no raw-log reads; an ordinary append reads only the new tail; forks, sub-agents, replacements, truncations, and failed safety checks fall back to the full correctness path. A bounded rolling audit occasionally re-reads one historical file. Very large first-time indexes checkpoint before the Mac app timeout and resume on the next sync instead of restarting
 - The Codex parser cache contains derived aggregates and replay metadata, not raw prompt or response text. It is independent of upload state and can be deleted safely (the next sync rebuilds it). `reset` intentionally keeps it so the required full re-upload does not also require a full disk rescan. Set `VIBE_USAGE_CODEX_CACHE=0` to disable the optimization for diagnosis
 - SQLite-backed tools are read via Node's built-in `node:sqlite` on Node ≥ 22.5 — no `sqlite3` binary needed (works on Windows out of the box); on older Node the CLI falls back to the system `sqlite3` executable
-- For continuous syncing, use `npx @vibe-cafe/vibe-usage daemon` or the [Vibe Usage Mac app](https://github.com/vibe-cafe/vibe-usage-app)
+- Continuous syncing is on by default: the first run installs a background service (see [Background sync](#background-sync)); the [Vibe Usage Mac app](https://github.com/vibe-cafe/vibe-usage-app) is the menu-bar alternative
 
 ## Cursor 网络排查
 
@@ -211,36 +220,30 @@ npx @vibe-cafe/vibe-usage config remove-root grok /path/to/grok-home
 
 Default roots are always scanned and existing `codexExtraHome` configurations remain valid. Additional roots are only scanned after they are explicitly added. If a configured root later becomes unavailable, that tool is skipped for the current sync so its incremental upload state is not pruned.
 
-## Daemon Mode
+## Background sync
 
-### Background service (recommended)
+The first `npx @vibe-cafe/vibe-usage` run installs a user-level service (systemd on Linux, launchd on macOS, Task Scheduler on Windows — no admin rights needed) that syncs every 30 minutes and starts automatically on login. Nothing else to do.
 
-Install as a system service for automatic background syncing:
-
-```bash
-npx @vibe-cafe/vibe-usage daemon install
-```
-
-This creates a user-level service (systemd on Linux, launchd on macOS, Task Scheduler on Windows — no admin rights needed) that syncs every 30 minutes and starts automatically on login. Manage with:
+<details>
+<summary>Managing the service, and how it is launched</summary>
 
 ```bash
 npx @vibe-cafe/vibe-usage daemon status
 npx @vibe-cafe/vibe-usage daemon stop
 npx @vibe-cafe/vibe-usage daemon restart
 npx @vibe-cafe/vibe-usage daemon uninstall
+npx @vibe-cafe/vibe-usage daemon install    # only needed after --no-daemon or uninstall
 ```
 
-For reliable operation, install globally first: `npm install -g @vibe-cafe/vibe-usage`
+**How the service starts the CLI.** When you ran the CLI through `npx`, the service is registered as `npx --yes @vibe-cafe/vibe-usage@latest daemon`, so it survives `npm cache clean` and picks up the newest release at every login. When the CLI was installed globally (`npm install -g @vibe-cafe/vibe-usage`) or run from a checkout, the service pins that exact `node <bin> daemon` path instead — upgrade the package and `daemon restart` to pick up a new version. `daemon status` prints which of the two forms a machine has. A service installed by a CLI older than 0.10.25 keeps its pinned npx-cache path; to switch it to the self-updating form run `daemon uninstall` and then the bare command once.
 
-### Foreground mode
-
-Run continuous syncing in the foreground (every 30 minutes):
+**Foreground mode** (no service, Ctrl+C to stop):
 
 ```bash
 npx @vibe-cafe/vibe-usage daemon
 ```
 
-Press Ctrl+C to stop.
+</details>
 
 ## License
 
