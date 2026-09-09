@@ -245,5 +245,23 @@ Test hooks (env vars honored at module load, set them before importing):
 ## Versioning
 
 - Keep `version` aligned in `package.json` and `package-lock.json` before publishing
+  (`npm version <x.y.z> --no-git-tag-version` updates both; hand-editing one is how they drift)
 - Published as `@vibe-cafe/vibe-usage` on npm
 - Users run via `npx @vibe-cafe/vibe-usage`
+
+### Publishing with 2FA on the account (2026-09-09, three failed attempts)
+
+- **`npm whoami` returning a username is not proof you can publish.** A stored token
+  authenticates the account but does not satisfy two-factor; `npm publish` then fails
+  `EOTP` after packing, which reads like a packaging problem and is not one.
+- **`npm login --auth-type=web` is a separate network path and can fail on its own.**
+  It posts to `registry.npmjs.org/-/v1/login`; that endpoint returned `ECONNRESET`
+  while `publish` reached the registry fine in the same minute. **A login failure is not
+  evidence that the registry is unreachable** — the proof that the publish path works is
+  a well-formed `EOTP` response coming back from it.
+- **The path that works when 2FA is enabled: `npm publish --access public --otp=<6 digits>`**,
+  reading the code from the authenticator app. It skips the login endpoint entirely.
+- **Verify by unpacking what was published, not by the exit code.** `npm pack
+  @vibe-cafe/vibe-usage@<version> --prefer-online`, untar, and grep the shipped `src/`
+  for the change. `npm view <pkg> version` without `--prefer-online` reads a local cache
+  and will happily report the previous version as current.
