@@ -143,6 +143,21 @@ test('services preserve Pi store relocation variables', () => {
   assert.match(plist, /<string>\/tmp\/pi&amp;a&lt;b&gt;\/sessions<\/string>/);
 });
 
+test('services preserve a custom Hermes home for background sync', () => {
+  const env = { HERMES_HOME: '/tmp/hermes&a<b>' };
+  const unit = generateSystemdUnit('/usr/bin/node', '/opt/vibe-usage/bin.js', undefined, env);
+  assert.match(unit, /Environment="HERMES_HOME=\/tmp\/hermes&a<b>"/);
+
+  const plist = generateLaunchdPlist('/usr/bin/node', '/opt/vibe-usage/bin.js', undefined, env);
+  assert.match(plist, /<key>HERMES_HOME<\/key>/);
+  assert.match(plist, /<string>\/tmp\/hermes&amp;a&lt;b&gt;<\/string>/);
+
+  const cmd = generateWindowsTaskCmd('C:\\node\\node.exe', 'C:\\vibe\\bin.js', undefined, {
+    HERMES_HOME: 'C:\\hermes 100%',
+  });
+  assert.match(cmd, /set "HERMES_HOME=C:\\hermes 100%%"/);
+});
+
 // ---- npx launcher mode: the service re-resolves the package instead of
 // pinning a cache path that disappears on `npm cache clean`. ----
 

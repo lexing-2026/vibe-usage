@@ -1,24 +1,22 @@
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { discoverHermesDatabases } from '../hermes-roots.js';
 import { aggregateToBuckets, extractSessions } from './aggregate.js';
 import { toCount } from './fs-utils.js';
 import { queryDbJson, sqliteUnavailableError, isSqliteUnavailableError } from './sqlite.js';
-
-const HERMES_HOME = process.env.HERMES_HOME || join(homedir(), '.hermes');
 
 /**
  * Parse Hermes Agent usage data from its SQLite databases.
  *
  * Hermes supports multiple profiles — the default profile lives at
- * ~/.hermes/state.db, while named profiles live at ~/.hermes/profiles/<name>/state.db.
+ * <home>/state.db, while named profiles live at <home>/profiles/<name>/state.db.
+ * The home is shared by CLI/Desktop: ~/.hermes on macOS/Linux, LOCALAPPDATA/hermes
+ * on Windows, or an explicit HERMES_HOME.
  * Each profile is an independent HERMES_HOME with its own state.db, so we scan all of them.
  *
  * Token buckets come from the sessions table (cumulative per-session totals).
  * Session timing comes from the messages table (per-message role + timestamp).
  */
 export async function parse() {
-  const dbs = discoverDbPaths(HERMES_HOME);
+  const dbs = discoverHermesDatabases();
   if (dbs.length === 0) return { buckets: [], sessions: [] };
 
   const entries = [];
@@ -68,19 +66,15 @@ export async function parse() {
       });
     }
 
-    let messageRows;
-    try {
-      messageRows = queryDb(dbPath, `SELECT
-        session_id as sessionId,
-        role,
-        timestamp
-        FROM messages
-        WHERE role IN ('user', 'assistant')
-        ORDER BY timestamp`);
-    } catch {
-      // Messages query failed for this profile — skip its session events
-      continue;
-    }
+    // A failed query is not an empty session history. Let sync protect this
+    // source's previous state instead of uploading/pruning a partial result.
+    const messageRows = queryDb(dbPath, `SELECT
+      session_id as sessionId,
+      role,
+      timestamp
+      FROM messages
+      WHERE role IN ('user', 'assistant')
+      ORDER BY timestamp`);
 
     for (const row of messageRows) {
       const timestamp = new Date(row.timestamp * 1000);
@@ -97,34 +91,6 @@ export async function parse() {
   }
 
   return { buckets: aggregateToBuckets(entries), sessions: extractSessions(sessionEvents) };
-}
-
-function discoverDbPaths(home) {
-  const dbs = [];
-
-  const defaultDb = join(home, 'state.db');
-  if (existsSync(defaultDb)) dbs.push({ path: defaultDb, profile: 'default' });
-
-  const profilesDir = join(home, 'profiles');
-  if (existsSync(profilesDir)) {
-    let entries;
-    try {
-      entries = readdirSync(profilesDir, { withFileTypes: true });
-    } catch {
-      return dbs;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const profileDb = join(profilesDir, entry.name, 'state.db');
-      try {
-        if (statSync(profileDb).isFile()) dbs.push({ path: profileDb, profile: entry.name });
-      } catch {
-        // missing or unreadable — skip
-      }
-    }
-  }
-
-  return dbs;
 }
 
 function queryDb(dbPath, sql) {

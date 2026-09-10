@@ -46,6 +46,7 @@ vibe-usage/
 │   ├── cline-roots.js         # Standalone + VSCode-host Cline discovery
 │   ├── cindy-roots.js          # Cindy Global/CN Electron roots + per-owner DB discovery
 │   ├── craft-roots.js         # CraftAgent root resolution and detection
+│   ├── hermes-roots.js        # Shared Hermes CLI/Desktop home + profile discovery; Windows LOCALAPPDATA with legacy fallback
 │   ├── qoder-roots.js         # Qoder / Qoder CN edition table, CLI config dir + IDE data dir resolution, detection
 │   ├── workbuddy-roots.js     # WorkBuddy default and fixture/relocation roots
 │   ├── tools.js               # TOOLS[] registry + detectInstalledTools()

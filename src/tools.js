@@ -12,6 +12,7 @@ import {
 } from './extra-roots.js';
 import { findClineDataDirs } from './cline-roots.js';
 import { findCraftDataDirs } from './craft-roots.js';
+import { findHermesDataDirs, getHermesHome } from './hermes-roots.js';
 import { findOmpDataDirs, findPiDataDirs } from './pi-roots.js';
 import { findQoderDataDirs, getQoderProjectsDir } from './qoder-roots.js';
 import { findWorkbuddyDataDirs } from './workbuddy-roots.js';
@@ -396,7 +397,8 @@ export const TOOLS = [
   {
     name: 'Hermes',
     id: 'hermes',
-    dataDir: join(homedir(), '.hermes', 'state.db'),
+    dataDir: join(getHermesHome(), 'state.db'),
+    detectDataDirs: findHermesDataDirs,
   },
   {
     name: 'Kiro',
