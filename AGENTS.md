@@ -18,6 +18,7 @@ vibe-usage/
 │   │   ├── cindy-ledger.js      # Cindy-private Codex/Pi daily ledger augmentation; no chat reads
 │   │   ├── codex.js
 │   │   ├── codex-cache.js     # Versioned, disposable per-rollout Codex parser cache
+│   │   ├── cola.js            # Cola Pi-compatible sessions; copied headers retain record identities
 │   │   ├── grok.js            # ~/.grok/sessions updates.jsonl turn_completed usage
 │   │   ├── copilot-cli.js
 │   │   ├── sqlite.js          # queryDbJson() — node:sqlite (Node ≥22.5), falls back to sqlite3 CLI
@@ -44,6 +45,7 @@ vibe-usage/
 │   │   └── zcode.js           # SQLite (via sqlite.js), reads message table
 │   ├── pi-roots.js            # Pi/OMP default, Pi-configured (env + settings.json), profile, XDG, and override discovery
 │   ├── cline-roots.js         # Standalone + VSCode-host Cline discovery
+│   ├── cola-roots.js          # Cola sessions discovery, including COLA_DATA_DIR
 │   ├── cindy-roots.js          # Cindy Global/CN Electron roots + per-owner DB discovery
 │   ├── craft-roots.js         # CraftAgent root resolution and detection
 │   ├── hermes-roots.js        # Shared Hermes CLI/Desktop home + profile discovery; Windows LOCALAPPDATA with legacy fallback
@@ -115,6 +117,8 @@ passing this gate.
 | Rollback | Web: revert the copy PR. CLI: publish a version that restores the prompt; already-installed npx-mode services keep working since they always resolve `@latest`. |
 
 ## Key Conventions
+
+- **Approved 2026-09-10 — Cola source:** add `cola` to the CLI and backend source registries using the existing bucket/session schema and backend-owned privacy policy. Read `~/.cola/sessions` or `$COLA_DATA_DIR/sessions`; project comes from the session cwd basename, never a channel/scope slug. Cola 1.4.4 copies transcripts with a new header id/time but unchanged records: opt only Cola into dedup by record id + original timestamp + parent id + role + model, keep the richest usage, and attribute it to the earliest available header (stable session-id/path tie-break). Existing Pi-family dedup keys remain unchanged. Read failures protect prior upload state and suppress partial Cola uploads. No migration/reset is required. Release ordering: deploy backend source registration first, then commit the CLI support together with the Hermes fixes in the unpublished release; the maintainer publishes npm. Rollback removes Cola parsing/registration while preserving existing data.
 
 - **Pure ESM** (`"type": "module"`) — no CommonJS, no build step
 - **Zero dependencies** — only Node built-ins (fs, path, os, crypto, https, readline, child_process, zlib, `node:sqlite`)

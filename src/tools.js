@@ -11,6 +11,7 @@ import {
   grokSessionsDir,
 } from './extra-roots.js';
 import { findClineDataDirs } from './cline-roots.js';
+import { findColaDataDirs, getColaSessionsDir } from './cola-roots.js';
 import { findCraftDataDirs } from './craft-roots.js';
 import { findHermesDataDirs, getHermesHome } from './hermes-roots.js';
 import { findOmpDataDirs, findPiDataDirs } from './pi-roots.js';
@@ -266,6 +267,12 @@ export const TOOLS = [
     detectDataDirs: ({ codexExtraHome, extraRoots } = {}) => (
       findCodexDataDirs(codexExtraHome, extraRootList(extraRoots?.codex))
     ),
+  },
+  {
+    name: 'Cola',
+    id: 'cola',
+    dataDir: getColaSessionsDir(),
+    detectDataDirs: findColaDataDirs,
   },
   {
     name: 'Grok',

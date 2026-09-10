@@ -158,6 +158,16 @@ test('services preserve a custom Hermes home for background sync', () => {
   assert.match(cmd, /set "HERMES_HOME=C:\\hermes 100%%"/);
 });
 
+test('services preserve a custom Cola data directory for background sync', () => {
+  const env = { COLA_DATA_DIR: '/tmp/cola custom' };
+  assert.match(generateSystemdUnit('/usr/bin/node', '/opt/vibe/bin.js', undefined, env),
+    /Environment="COLA_DATA_DIR=\/tmp\/cola custom"/);
+  assert.match(generateLaunchdPlist('/usr/bin/node', '/opt/vibe/bin.js', undefined, env),
+    /<key>COLA_DATA_DIR<\/key>\s*<string>\/tmp\/cola custom<\/string>/);
+  assert.match(generateWindowsTaskCmd('C:\\node\\node.exe', 'C:\\vibe\\bin.js', undefined,
+    { COLA_DATA_DIR: 'C:\\Cola Data' }), /set "COLA_DATA_DIR=C:\\Cola Data"/);
+});
+
 // ---- npx launcher mode: the service re-resolves the package instead of
 // pinning a cache path that disappears on `npm cache clean`. ----
 
