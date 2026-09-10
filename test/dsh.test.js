@@ -52,10 +52,10 @@ function assistantRecord(time, model, usage) {
   };
 }
 
-function writeSession(root, projectKey, sessionId, records, plain = false) {
+function writeSession(root, projectKey, sessionId, records, plain = false, version = 0) {
   const dir = join(root, projectKey, sessionId);
   mkdirSync(dir, { recursive: true });
-  const name = plain ? 'session.jsonl' : 'session.jsonl.zstd';
+  const name = `session${version === 0 ? '' : `.v${version}`}.jsonl${plain ? '' : '.zstd'}`;
   const payload = plain
     ? Buffer.from(records.map((record) => JSON.stringify(record) + '\n').join(''))
     : zstdFrames(records);
@@ -511,7 +511,7 @@ test('DSH skips corrupt files and protects prior state', { skip: !hasBuiltinZstd
 test('DSH skips logs with an unknown session format version', async () => {
   await withDshSessions(async (sessions) => {
     writeSession(sessions, 'proj-g', 'session-9', [
-      sessionRecord('session-9', '/home/me/proj-g', 1),
+      sessionRecord('session-9', '/home/me/proj-g', 99),
       userRecord(1700000100000),
       assistantRecord(1700000120000, 'model-a', { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, reasoningTokens: 0 }),
     ], true);
@@ -519,6 +519,208 @@ test('DSH skips logs with an unknown session format version', async () => {
     const result = await parse();
     assert.equal(result.skipped, true);
     assert.deepEqual(result.buckets, []);
-    assert.ok(result.warnings.some((warning) => /format version 1/.test(warning)));
+    assert.ok(result.warnings.some((warning) => /format version 99/.test(warning)));
   });
 });
+
+function versionedHeader(id, version, extra = {}) {
+  return sessionRecord(id, `/home/me/${id}`, version, {
+    ...(version >= 2 ? { isSeeded: false } : {}),
+    ...extra,
+  });
+}
+
+function identifiedTurn(prefix, inputTokens = 100, time = 1700000100000) {
+  const user = userRecord(time);
+  user.data.id = `${prefix}-user`;
+  const assistant = assistantRecord(time + 20000, 'deepseek-v4-pro', {
+    inputTokens, cacheWriteTokens: 7, cacheReadTokens: 200, outputTokens: 50, reasoningTokens: 20,
+  });
+  assistant.data.message.id = `${prefix}-assistant`;
+  return [user, assistant];
+}
+
+for (const version of [1, 2, 3]) {
+  for (const plain of [true, false]) {
+    test(`DSH reads V${version} ${plain ? 'plain' : 'multi-frame zstd'} logs`, { skip: !plain && !hasBuiltinZstd }, async () => {
+      await withDshSessions(async (sessions) => {
+        writeSession(sessions, 'project', 'modern', [
+          versionedHeader('modern', version),
+          ...withSeq(identifiedTurn('turn')),
+          // Embedded stream usage and failed attempts are not extra messages.
+          { type: 'assistant/attempt', seq: 2, time: 1700000130000, data: { stream: [] } },
+        ], plain, version);
+        const result = await parse();
+        assert.equal(result.skipped, undefined);
+        assert.deepEqual(result.buckets.map(b => [b.inputTokens, b.outputTokens, b.cachedInputTokens, b.reasoningOutputTokens]), [[107, 30, 200, 20]]);
+        assert.equal(result.sessions.length, 1);
+        assert.equal(result.sessions[0].messageCount, 2);
+      });
+    });
+  }
+}
+
+test('DSH selects the newest generation once, ignores temporary names, and follows live appends', async () => {
+  await withDshSessions(async (sessions) => {
+    const historical = withSeq(identifiedTurn('old'));
+    for (const version of [0, 1, 2, 3]) {
+      const dir = writeSession(sessions, 'project', 'same-id', [
+        versionedHeader('same-id', version), ...historical,
+      ], true, version);
+      // Noncanonical files must not mask the actual current log.
+      for (const name of ['session.v99.jsonl.tmp', 'session.v03.jsonl', 'session.v0.jsonl']) {
+        writeFileSync(join(dir, name), 'not a session');
+      }
+    }
+    const before = await parse();
+    assert.equal(before.buckets[0].inputTokens, 107);
+    assert.equal(before.sessions.length, 1);
+    writeSession(sessions, 'project', 'same-id', [
+      versionedHeader('same-id', 3), ...historical,
+      ...withSeq(identifiedTurn('new', 300, 1700000200000), 2),
+    ], true, 3);
+    const after = await parse();
+    assert.equal(after.skipped, undefined);
+    assert.equal(after.buckets[0].inputTokens, 414);
+    assert.equal(after.sessions[0].messageCount, 4);
+    assert.equal(after.sessions[0].sessionHash, before.sessions[0].sessionHash);
+  });
+});
+
+test('DSH prefers the newest format across copied project dirs even when the older log is larger', async () => {
+  await withDshSessions(async (sessions) => {
+    writeSession(sessions, 'old-project', 'same-id', [
+      versionedHeader('same-id', 1),
+      ...withSeq(identifiedTurn('old', 900)),
+      { type: 'assistant/chunk', data: { padding: 'x'.repeat(2000) } },
+    ], true, 1);
+    writeSession(sessions, 'new-project', 'same-id', [
+      versionedHeader('same-id', 3), ...withSeq(identifiedTurn('current', 100)),
+    ], true, 3);
+    const result = await parse();
+    assert.equal(result.buckets[0].inputTokens, 107);
+    assert.equal(result.sessions.length, 1);
+  });
+});
+
+for (const version of [1, 2, 3]) {
+  test(`DSH V${version} skips only the proven inherited prefix, retaining resumed local turns`, async () => {
+    await withDshSessions(async (sessions) => {
+      const inherited = withSeq(identifiedTurn('parent', 100));
+      const local = withSeq(identifiedTurn('child', 300, 1700000200000), 3);
+      writeSession(sessions, 'project', 'parent', [
+        versionedHeader('parent', version), ...inherited,
+      ], true, version);
+      writeSession(sessions, 'project', 'child', [
+        versionedHeader('child', version, {
+          parentSession: 'parent', ...(version === 1 ? { seedLength: 2 } : { isSeeded: true }),
+        }),
+        ...inherited,
+        { ...endSeedRecord(2), data: version === 1 ? {} : { inherited: true } },
+        ...local,
+        endSeedRecord(5),
+      ], true, version);
+      const result = await parse();
+      assert.equal(result.skipped, undefined);
+      const child = result.buckets.find(b => b.project === 'child');
+      assert.equal(child.inputTokens, 307);
+      assert.equal(result.sessions.find(s => s.project === 'child').messageCount, 2);
+    });
+  });
+}
+
+test('DSH V3 uses the last inherited marker for a fork of an already seeded session', async () => {
+  await withDshSessions(async (sessions) => {
+    const parentRows = [
+      ...withSeq(identifiedTurn('grandparent', 100)),
+      { ...endSeedRecord(2), data: { inherited: true } },
+      ...withSeq(identifiedTurn('parent', 200, 1700000200000), 3),
+    ];
+    writeSession(sessions, 'project', 'parent', [
+      versionedHeader('parent', 3, { isSeeded: true, parentSession: 'missing-grandparent' }), ...parentRows,
+    ], true, 3);
+    writeSession(sessions, 'project', 'child', [
+      versionedHeader('child', 3, { isSeeded: true, parentSession: 'parent' }), ...parentRows,
+      { ...endSeedRecord(5), data: { inherited: true } },
+      ...withSeq(identifiedTurn('child', 300, 1700000300000), 6),
+      endSeedRecord(8),
+    ], true, 3);
+    const result = await parse();
+    assert.equal(result.skipped, undefined);
+    assert.equal(result.buckets.find(b => b.project === 'parent').inputTokens, 314);
+    assert.equal(result.buckets.find(b => b.project === 'child').inputTokens, 307);
+  });
+});
+
+for (const [parentVersion, childVersion] of [[2, 3], [3, 2], [1, 3]]) {
+  test(`DSH matches inherited message ids across V${parentVersion}/V${childVersion} sequence renumbering`, async () => {
+    await withDshSessions(async (sessions) => {
+      const inherited = identifiedTurn('parent', 100);
+      writeSession(sessions, 'project', 'parent', [
+        versionedHeader('parent', parentVersion), ...withSeq(inherited, 10),
+      ], true, parentVersion);
+      writeSession(sessions, 'project', 'child', [
+        versionedHeader('child', childVersion, { parentSession: 'parent', isSeeded: true }),
+        ...withSeq(inherited, 20),
+        { ...endSeedRecord(22), data: { inherited: true } },
+        ...withSeq(identifiedTurn('child', 300, 1700000200000), 23),
+      ], true, childVersion);
+      const result = await parse();
+      assert.equal(result.skipped, undefined);
+      assert.equal(result.buckets.find(b => b.project === 'child').inputTokens, 307);
+    });
+  });
+}
+
+test('DSH retains a mixed-version seed when message identity cannot prove the parent copy', async () => {
+  await withDshSessions(async (sessions) => {
+    writeSession(sessions, 'project', 'parent', [
+      versionedHeader('parent', 2), ...withSeq(identifiedTurn('parent', 100)),
+    ], true, 2);
+    writeSession(sessions, 'project', 'child', [
+      versionedHeader('child', 3, { parentSession: 'parent', isSeeded: true }),
+      ...withSeq(identifiedTurn('different-ids', 100)),
+      { ...endSeedRecord(2), data: { inherited: true } },
+    ], true, 3);
+    const result = await parse();
+    assert.equal(result.buckets.find(b => b.project === 'child').inputTokens, 107);
+  });
+});
+
+for (const extra of [{ isSeeded: false }, { isSeeded: true, parentSession: 'missing' }]) {
+  test(`DSH V3 counts ${extra.isSeeded ? 'missing-parent inherited' : 'unseeded'} history in full`, async () => {
+    await withDshSessions(async (sessions) => {
+      writeSession(sessions, 'project', 'child', [
+        versionedHeader('child', 3, extra), ...withSeq(identifiedTurn('turn', 100)),
+        ...(extra.isSeeded ? [{ ...endSeedRecord(2), data: { inherited: true } }] : []),
+        endSeedRecord(3),
+      ], true, 3);
+      const result = await parse();
+      assert.equal(result.skipped, undefined);
+      assert.equal(result.buckets[0].inputTokens, 107);
+    });
+  });
+}
+
+for (const problem of ['future-version', 'corrupt', 'header-mismatch', 'missing-seed-marker']) {
+  test(`DSH reports ${problem} in the highest generation without falling back to stale data`, async () => {
+    await withDshSessions(async (sessions) => {
+      writeSession(sessions, 'project', 'stale', [
+        versionedHeader('stale', 0), ...withSeq(identifiedTurn('old', 100)),
+      ], true);
+      const dir = writeSession(sessions, 'project', 'stale', [
+        versionedHeader('stale', problem === 'header-mismatch' ? 2 : 3, {
+          isSeeded: problem === 'missing-seed-marker',
+        }), ...withSeq(identifiedTurn('new', 300)),
+      ], true, problem === 'future-version' ? 10 : 3);
+      if (problem === 'corrupt') writeFileSync(join(dir, 'session.v3.jsonl'), 'broken');
+      writeSession(sessions, 'project', 'healthy', [
+        versionedHeader('healthy', 3), ...withSeq(identifiedTurn('healthy', 200)),
+      ], true, 3);
+      const result = await parse();
+      assert.equal(result.skipped, true);
+      assert.ok(result.warnings.some(w => w.includes('stale')));
+      assert.deepEqual(result.buckets.map(b => b.project), ['healthy']);
+    });
+  });
+}

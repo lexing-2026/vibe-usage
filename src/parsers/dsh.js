@@ -7,13 +7,14 @@ import { aggregateToBuckets, extractSessions } from './aggregate.js';
 
 const SOURCE = 'dsh';
 
-// DeepSeek Harness session-log format version this parser understands. DeepSeek
-// Harness is currently in developer preview and is iterating rapidly — THERE
-// WILL BE COMPATIBILITY-BREAKING CHANGES. When the CLI bumps the header
-// `version` field, bump this constant (and the record-shape mapping below)
-// after re-checking the on-disk format instead of guessing against stale
-// assumptions.
-const SESSION_FORMAT_VERSION = 0;
+// Verified against deepseek-ai/deepseek-harness tag dsh-v0.1.5-alpha.2:
+// packages/session/session-format/src/filename.ts, session-format-v0-to-v1,
+// session-format-v1-to-v2, session-format-v2-to-v3, and core/session/src/types.ts.
+// V0/V1 use header.seedLength; V2/V3 use a tagged inherited end-seed marker.
+// Re-check the format before accepting another version; never silently read a
+// frozen predecessor when a newer generation is present.
+const MAX_SESSION_FORMAT_VERSION = 3;
+const SESSION_FILENAME = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/;
 
 // Safety cap for a single session log. DSH stores many small zstd frames per
 // file; anything beyond this is either a runaway log or not a session file.
@@ -198,18 +199,10 @@ function isUserMessageRecord(rec) {
  *   ... possibly a resumed/forked seed replay, then ...
  *   {"type":"user/message"|"assistant/message","time":...,"data":{...}}
  *
- * DSH (developer preview) writes session/end-seed records in three situations:
- * right after session creation (empty seed), at each resume boundary, and
- * appended at the END of a file when that session becomes the seed for a
- * further resume. The marker's position is therefore NOT a replay boundary —
- * a trailing marker would make "skip everything before the last marker"
- * discard the session's entire real history.
- *
- * Fork/subagent lineage is encoded separately in the immutable header.
- * `parentSession` identifies the source and `seedLength` is the exact number
- * of leading event seqs inherited from it. Only those seqs are skipped, and
- * only while the parent file is also present, so a missing/corrupt source
- * fails open instead of dropping the sole local copy of its usage.
+ * V0/V1 use header.seedLength. Their untagged end-seed markers can appear
+ * after real history and must never be treated as a replay boundary. V2/V3
+ * instead require isSeeded and use the LAST end-seed with data.inherited=true.
+ * Only a proven inherited prefix also present in the parent is skipped.
  *
  * Only user/message (source.kind === 'user') and assistant/message records
  * are kept in the model — they are the only records that produce usage
@@ -220,7 +213,7 @@ function isUserMessageRecord(rec) {
  * session_projcache totals DSH itself maintains), so reasoning is split out of
  * output before aggregation, like the Pi-family parsers.
  */
-function buildSessionModel(text) {
+function buildSessionModel(text, fileVersion) {
   const lines = text.split('\n');
 
   let header = null;
@@ -240,16 +233,23 @@ function buildSessionModel(text) {
   if (!header || typeof header.id !== 'string' || header.id.length === 0) {
     throw new Error('missing session header record');
   }
-  if (header.version !== SESSION_FORMAT_VERSION) {
+  if (!Number.isInteger(header.version) || header.version < 0 || header.version > MAX_SESSION_FORMAT_VERSION) {
     const error = new Error(
       'session ' + header.id + ' uses format version ' + header.version +
-      ' (parser supports ' + SESSION_FORMAT_VERSION + ')',
+      ' (parser supports 0–' + MAX_SESSION_FORMAT_VERSION + ')',
     );
     error.code = 'UNSUPPORTED_FORMAT_VERSION';
     throw error;
   }
+  if (header.version !== fileVersion) {
+    throw new Error('session header format version ' + header.version + ' disagrees with filename version ' + fileVersion);
+  }
+  if (header.version >= 2 && typeof header.isSeeded !== 'boolean') {
+    throw new Error('format v' + header.version + ' session header lacks isSeeded');
+  }
 
   const messages = [];
+  let inheritedSeq = null;
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].length === 0) continue;
     let rec;
@@ -263,8 +263,13 @@ function buildSessionModel(text) {
     if (timeMs == null) continue;
     const seq = Number.isSafeInteger(rec.seq) && rec.seq >= 0 ? rec.seq : null;
 
+    if (header.version >= 2 && rec.type === 'session/end-seed' && rec.data?.inherited === true) {
+      if (seq == null) throw new Error('inherited end-seed marker lacks a valid seq');
+      inheritedSeq = seq;
+    }
+
     if (isUserMessageRecord(rec)) {
-      messages.push({ seq, role: 'user', timeMs, usage: null, model: null });
+      messages.push({ seq, messageId: messageId(rec.data.id), role: 'user', timeMs, usage: null, model: null });
       continue;
     }
     if (!isUsageRecord(rec)) continue;
@@ -273,6 +278,7 @@ function buildSessionModel(text) {
     // usage block is missing; the model keeps it so timing survives.
     messages.push({
       seq,
+      messageId: messageId(rec.data.message?.id),
       role: 'assistant',
       timeMs,
       usage: parseUsage(rec.data.usage),
@@ -283,19 +289,28 @@ function buildSessionModel(text) {
     });
   }
 
+  if (header.version >= 2 && header.isSeeded !== (inheritedSeq !== null)) {
+    throw new Error('isSeeded disagrees with the inherited end-seed marker');
+  }
+
   return {
+    formatVersion: header.version,
     sessionId: header.id,
     parentSessionId:
       typeof header.parentSession === 'string' && header.parentSession
         ? header.parentSession
         : null,
-    seedLength:
+    seedLength: header.version >= 2 ? (inheritedSeq ?? 0) :
       Number.isSafeInteger(header.seedLength) && header.seedLength > 0
         ? header.seedLength
         : 0,
     cwd: header.cwd,
     messages,
   };
+}
+
+function messageId(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 /** Record wall-clock time in epoch ms; null when absent/invalid. */
@@ -337,9 +352,10 @@ function sameUsage(left, right) {
 /**
  * Number of leading child messages inherited from a parent seed.
  *
- * `header.seedLength` is DSH's durable fork-lineage boundary: event seqs below
- * it came from the parent, while later seqs belong to the child. Each skipped
- * message must still exist at the same seq in the selected parent copy.
+ * seedLength is normalized from the version's durable inheritance boundary.
+ * Each skipped message must still exist in the selected parent copy. Format
+ * migrations renumber events, but preserve existing message ids; mixed-format
+ * parents therefore need matching ids in order, never a token-count heuristic.
  * Missing, invalid, or divergent records fail open so usage is not lost.
  */
 function replaySkipCount(child, parent) {
@@ -347,21 +363,30 @@ function replaySkipCount(child, parent) {
   let parentIndex = 0;
   let previousSeq = -1;
   let count = 0;
+  const mixedVersions = child.formatVersion !== parent.formatVersion;
   for (const message of child.messages) {
     if (message.seq == null || message.seq <= previousSeq) return 0;
     previousSeq = message.seq;
     if (message.seq >= child.seedLength) break;
 
-    while (
-      parentIndex < parent.messages.length &&
-      parent.messages[parentIndex].seq != null &&
-      parent.messages[parentIndex].seq < message.seq
-    ) {
-      parentIndex++;
+    if (mixedVersions) {
+      if (!message.messageId) return 0;
+      while (parentIndex < parent.messages.length && parent.messages[parentIndex].messageId !== message.messageId) {
+        parentIndex++;
+      }
+    } else {
+      while (
+        parentIndex < parent.messages.length &&
+        parent.messages[parentIndex].seq != null &&
+        parent.messages[parentIndex].seq < message.seq
+      ) {
+        parentIndex++;
+      }
     }
     const source = parent.messages[parentIndex];
     if (
-      source?.seq !== message.seq ||
+      !source ||
+      (!mixedVersions && source.seq !== message.seq) ||
       source.role !== message.role ||
       source.model !== message.model ||
       !sameUsage(source.usage, message.usage)
@@ -397,7 +422,27 @@ function modelToResult(model, skipCount) {
   return { entries, events };
 }
 
-/** List session log files under a DSH sessions root (session.jsonl[.zstd]). */
+/** Pick the highest canonical generation per session, like DSH persistence. */
+function selectSessionFile(sessionPath) {
+  let selected = null;
+  for (const entry of readdirSync(sessionPath, { withFileTypes: true })) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+    const match = SESSION_FILENAME.exec(entry.name);
+    if (!match) continue;
+    const version = Number(match[1] || 0);
+    if (!Number.isSafeInteger(version)) throw new Error('invalid format version in ' + entry.name);
+    const compressed = Boolean(match[2]);
+    if (!selected || version > selected.version || (version === selected.version && compressed)) {
+      selected = { file: join(sessionPath, entry.name), version, compressed };
+    }
+  }
+  if (selected && selected.version > MAX_SESSION_FORMAT_VERSION) {
+    throw new Error('format version ' + selected.version + ' is not supported; update Vibe Usage');
+  }
+  return selected;
+}
+
+/** List session.jsonl[.zstd] (V0) and session.vN.jsonl[.zstd] (V1+). */
 function listSessionFiles(sessionsDir, onFailure) {
   const files = [];
   const projectKeys = readdirSync(sessionsDir, { withFileTypes: true })
@@ -419,22 +464,14 @@ function listSessionFiles(sessionsDir, onFailure) {
     for (const sessionDir of sessionDirs) {
       if (!sessionDir.isDirectory()) continue;
       const sessionPath = join(projectDir, sessionDir.name);
-      for (const name of ['session.jsonl.zstd', 'session.jsonl']) {
-        const file = join(sessionPath, name);
-        try {
-          if (statSync(file).isFile()) {
-            files.push({ file, compressed: name.endsWith('.zstd') });
-            break;
-          }
-        } catch (error) {
-          if (error?.code !== 'ENOENT') {
-            onFailure(
-              'dsh: cannot inspect ' + relative(sessionsDir, file) +
-              ' (' + (error?.code || error?.message || 'stat failed') + ')',
-            );
-            break;
-          }
-        }
+      try {
+        const selected = selectSessionFile(sessionPath);
+        if (selected) files.push(selected);
+      } catch (error) {
+        onFailure(
+          'dsh: cannot read session directory ' + relative(sessionsDir, sessionPath) +
+          ' (' + (error?.message || error?.code || 'read failed') + ')',
+        );
       }
     }
   }
@@ -444,17 +481,15 @@ function listSessionFiles(sessionsDir, onFailure) {
 /**
  * DeepSeek Harness (dsh) parser.
  *
- * Reads $DSH_HOME/sessions/<project-key>/session-<id>/session.jsonl.zstd
+ * Reads $DSH_HOME/sessions/<project-key>/<id>/session[.vN].jsonl[.zstd]
  * (default ~/.dsh, fixture/relocation override VIBE_USAGE_DSH_SESSIONS).
  * Zstandard session logs are multi-frame; node:zlib zstd (Node >= 22.15)
  * decodes one frame per call, so the buffer is walked frame-by-frame, with a
  * `zstd` CLI fallback for older Node.
  *
  * Replay handling: `header.parentSession` identifies a fork/subagent source,
- * and `header.seedLength` is the exact count of leading event seqs inherited
- * from it. Those records are skipped only when the parent file is also
- * present. Files without either field, and children whose parent is missing,
- * are counted in full. `session/end-seed` positions are never used.
+ * with a version-specific inheritance boundary (see buildSessionModel).
+ * Children whose parent is missing are counted in full.
  */
 export async function parse() {
   const sessionsDir = getDshSessionsDir();
@@ -485,10 +520,10 @@ export async function parse() {
     return result;
   }
 
-  // sessionId -> most complete model (largest decompressed log wins, so a
-  // session copied between project dirs is counted once).
+  // sessionId -> newest generation, then largest copy within that generation.
+  // Migrations can shrink a log by embedding chunks, so size alone is unsafe.
   const perSession = new Map();
-  for (const { file, compressed } of files) {
+  for (const { file, compressed, version } of files) {
     let text;
     try {
       const stat = statSync(file);
@@ -510,7 +545,7 @@ export async function parse() {
 
     let model;
     try {
-      model = buildSessionModel(text);
+      model = buildSessionModel(text, version);
     } catch (error) {
       recordFailure(
         'dsh: skipping ' + relative(process.cwd(), file) + ' (' + error.message + ')',
@@ -520,7 +555,8 @@ export async function parse() {
 
     const weight = text.length;
     const previous = perSession.get(model.sessionId);
-    if (!previous || weight > previous.weight) {
+    if (!previous || model.formatVersion > previous.model.formatVersion ||
+      (model.formatVersion === previous.model.formatVersion && weight > previous.weight)) {
       perSession.set(model.sessionId, { model, weight });
     }
   }
