@@ -252,7 +252,7 @@ const FULL_HELP = `
     ${BARE} init --manual-key <vbu_...>   Skip browser, use a pre-issued key (CI/headless)
     ${BARE} sync         Manually sync usage data
     ${BARE} sync --extra-codex-home <path>  Use another Codex Home for this run
-    ${BARE} summary       Print last 7 days as markdown (cost/tokens/model/project)
+    ${BARE} summary       Print last 7 days as markdown (cost/tokens/tool/model/project)
     ${BARE} summary --days N   Same, but over the last N days (1-90)
     ${BARE} daemon       Continuous sync (every 30m, foreground)
     ${BARE} daemon install    Install background service (systemd/launchd/Task Scheduler)
