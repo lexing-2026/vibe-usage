@@ -8,7 +8,7 @@ AI agent guidance for the vibe-usage CLI. See [README.md](./README.md) for user-
 vibe-usage/
 ├── bin/vibe-usage.js          # CLI entry point → src/index.js
 ├── src/
-│   ├── index.js               # Command router (init, sync, summary, daemon, reset, skill, status, config, help); short help by default, `help --all` for the full list; legacy spellings print a TTY-only hint
+│   ├── index.js               # Command router (init, sync, summary, daemon, reset, skill, status, config roots/add-root/remove-root, help); short help by default, `help --all` for the full list; legacy spellings print a TTY-only hint
 │   ├── parsers/               # One parser per tool, all export async parse() → { buckets, sessions }
 │   │   ├── index.js           # Parser registry
 │   │   ├── aggregate.js       # aggregateToBuckets() / extractSessions() (kept out of index.js to avoid the registry import cycle)
@@ -43,6 +43,7 @@ vibe-usage/
 │   │   ├── mcode.js           # MiniMax Code runtime-state SQLite ledger (allow-listed token fields only)
 │   │   ├── workbuddy.js       # Streaming JSONL; actual routed-model usage + sessions
 │   │   └── zcode.js           # SQLite (via sqlite.js), reads message table
+│   ├── extra-roots.js         # EXTRA_ROOT_SOURCES, validateExtraRoot(), extraRootList(), grokSessionsDir / antigravityConversationDirs / piSessionsDir
 │   ├── pi-roots.js            # Pi/OMP default, Pi-configured (env + settings.json), profile, XDG, and override discovery
 │   ├── cline-roots.js         # Standalone + VSCode-host Cline discovery
 │   ├── cola-roots.js          # Cola sessions discovery, including COLA_DATA_DIR
@@ -119,6 +120,8 @@ passing this gate.
 ## Key Conventions
 
 - **Approved 2026-09-10 — Cola source:** add `cola` to the CLI and backend source registries using the existing bucket/session schema and backend-owned privacy policy. Read `~/.cola/sessions` or `$COLA_DATA_DIR/sessions`; project comes from the session cwd basename, never a channel/scope slug. Cola 1.4.4 copies transcripts with a new header id/time but unchanged records: opt only Cola into dedup by record id + original timestamp + parent id + role + model, keep the richest usage, and attribute it to the earliest available header (stable session-id/path tie-break). Existing Pi-family dedup keys remain unchanged. Read failures protect prior upload state and suppress partial Cola uploads. No migration/reset is required. Release ordering: deploy backend source registration first, then commit the CLI support together with the Hermes fixes in the unpublished release; the maintainer publishes npm. Rollback removes Cola parsing/registration while preserving existing data.
+
+- **Additional runtime roots** — `config roots / add-root / remove-root` manages `config.extraRoots` through `src/extra-roots.js`. `EXTRA_ROOT_SOURCES` is the allow-list and `validateExtraRoot()` checks each source's supported layout. Default discovery is always retained; configured roots are additive. `sync.js` passes `extraRoots: extraRootList(config.extraRoots?.[source])` to each parser, so the config key must exactly match its parser/source id (for example `pi-coding-agent`, not `pi`). Merge and de-duplicate all roots inside the parser before returning buckets/sessions. A configured root that is missing, unreadable, or no longer resolves must return `skipped` with a warning, preserving previously uploaded state; never turn that failure into an empty success. Fixture overrides should isolate real-machine discovery. Grok ignores configured roots when its fixture override is set; Pi currently deliberately appends explicit `extraRoots` even with `VIBE_USAGE_PI_SESSION_DIRS`, so Pi tests must supply only temporary extra roots. Do not assume the override alone makes those tests hermetic.
 
 - **Pure ESM** (`"type": "module"`) — no CommonJS, no build step
 - **Zero dependencies** — only Node built-ins (fs, path, os, crypto, https, readline, child_process, zlib, `node:sqlite`)
@@ -242,6 +245,8 @@ VIBE_USAGE_DEV=1 node ./bin/vibe-usage.js sync
 # Quick parser test
 node -e "import('./src/parsers/<tool-id>.js').then(m => m.parse()).then(r => console.log(JSON.stringify(r, null, 2)))"
 ```
+
+Extra-root regression coverage: `test/cli.test.js` (config commands/validation), `test/grok.test.js`, `test/codex-roots.test.js`, and `test/pi-compatible.test.js` (additive discovery, merged results, and failure/state protection).
 
 Test hooks (env vars honored at module load, set them before importing):
 - `VIBE_USAGE_STATE_DIR` / `VIBE_USAGE_CONFIG_DIR` — redirect `state.js` / `config.js` away from the real `~/.vibe-usage` (used by `test/state.test.js`, `test/reset.test.js`)
