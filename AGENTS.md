@@ -43,6 +43,7 @@ vibe-usage/
 │   │   ├── mcode.js           # MiniMax Code runtime-state SQLite ledger (allow-listed token fields only)
 │   │   ├── workbuddy.js       # Streaming JSONL; actual routed-model usage + sessions
 │   │   └── zcode.js           # SQLite (via sqlite.js), reads message table
+│   ├── extra-roots.js         # Additional-root validation and per-source layout resolvers; used by config roots/add-root/remove-root
 │   ├── pi-roots.js            # Pi/OMP default, Pi-configured (env + settings.json), profile, XDG, and override discovery
 │   ├── cline-roots.js         # Standalone + VSCode-host Cline discovery
 │   ├── cola-roots.js          # Cola sessions discovery, including COLA_DATA_DIR
@@ -120,6 +121,8 @@ passing this gate.
 
 - **Approved 2026-09-10 — Cola source:** add `cola` to the CLI and backend source registries using the existing bucket/session schema and backend-owned privacy policy. Read `~/.cola/sessions` or `$COLA_DATA_DIR/sessions`; project comes from the session cwd basename, never a channel/scope slug. Cola 1.4.4 copies transcripts with a new header id/time but unchanged records: opt only Cola into dedup by record id + original timestamp + parent id + role + model, keep the richest usage, and attribute it to the earliest available header (stable session-id/path tie-break). Existing Pi-family dedup keys remain unchanged. Read failures protect prior upload state and suppress partial Cola uploads. No migration/reset is required. Release ordering: deploy backend source registration first, then commit the CLI support together with the Hermes fixes in the unpublished release; the maintainer publishes npm. Rollback removes Cola parsing/registration while preserving existing data.
 
+- **Additional runtime roots** — `config roots / add-root / remove-root` manages additive data directories. Follow the [parser and fixture conventions below](#additional-runtime-roots) when extending support.
+
 - **Pure ESM** (`"type": "module"`) — no CommonJS, no build step
 - **Zero dependencies** — only Node built-ins (fs, path, os, crypto, https, readline, child_process, zlib, `node:sqlite`)
 - **Incremental upload** — parsers emit a complete view of live local data, then `sync.js` diffs each item's content-hash against `~/.vibe-usage/state.json` and uploads only new/changed buckets/sessions — a quiet machine sends zero bytes. State is committed per-batch only after that batch's upload succeeds (failed batch re-sends next run); prune of dead keys (logs the parsers no longer emit) persists unconditionally and is bounded by liveness, never by age — and is scoped to sources whose parser succeeded that run, so a transient failure or an incomplete Codex cache build never evicts that tool's state into a full re-upload. Deleting `state.json` triggers a one-time full re-upload (which is exactly how `reset` re-populates remote data after deleting it).
@@ -136,6 +139,34 @@ passing this gate.
 - **Parser warnings are never filtered** — `sync.js` writes every parser warning to stderr, including quiet (daemon) runs, because the daemon log is the only trail a background failure leaves. A quiet-mode filter for Cursor's fetch soft-skip made a permanently failing export indistinguishable from a healthy one: empty `daemon.log`, `status` still listing the tool as installed, and zero data for months. Keep transient/permanent distinctions in the *message*, not in whether it is printed.
 - **Output style** — user-facing text is Chinese (colored via `output.js` helpers: `success` / `failure` / `warn` / `arrow` / `link`). Dashboard URLs use OSC 8 hyperlinks so terminals that support it (iTerm2, Warp, VSCode, Kitty, Terminal.app 14+) render them as clickable. Raw pass-through from external tools (parser errors, `systemctl` / `launchctl` output, daemon loop timestamps) is kept in English and dimmed so it's visually de-emphasized. `init` prints a big ASCII logo; other commands print a compact one-line header (`bigHeader()` / `smallHeader()` from `output.js`).
 - **CLI compatibility** — keep the documented legacy aliases `--key` (for `--manual-key`), `--daemon` (for `daemon`), and `reset --host` (for `reset --local`). The bare invocation remains init-or-sync, and since v0.10.25 the only command we advertise; every other subcommand stays supported. `--no-daemon` and `help --all` are public flags. Old spellings (`sync`, `daemon install`, the aliases above) print a one-line `hint()` pointing at the simpler form — **TTY-only**: the Mac and Windows apps read the CLI's piped stdout as the sync result / error text, so never print hints to a pipe. Do not preserve arbitrary unknown-command fallthrough; it was never a public command and can turn typos into unintended side effects.
+
+## Additional Runtime Roots
+
+`src/extra-roots.js` owns `EXTRA_ROOT_SOURCES`, `validateExtraRoot()`,
+`extraRootList()`, and the source-specific layout resolvers, including
+`grokSessionsDir()`, `antigravityConversationDirs()`, and `piSessionsDir()`.
+The currently supported source ids are `antigravity`, `codex`, `grok`, and
+`pi-coding-agent`.
+
+- **Config routing:** `config roots` lists `config.extraRoots` as JSON;
+  `config add-root <source> <path>` validates and persists a normalized path;
+  `config remove-root <source> <path>` removes it. `sync.js` passes
+  `extraRoots: extraRootList(config.extraRoots?.[source])` to each parser.
+  The config key must exactly match its parser/source id (`pi-coding-agent`,
+  not `pi`).
+- **Additive discovery:** keep each tool's default store and any legacy
+  `codexExtraHome` configuration. Extra roots must not replace or mask them.
+- **Parser result:** merge roots and de-duplicate overlapping paths or copied
+  records inside the parser before returning buckets and sessions, using that
+  source's existing deduplication rules.
+- **Read failures:** a configured root that is missing, unreadable, or no longer
+  resolves must produce `skipped: true` with a warning, never an empty success.
+  This prevents `sync.js` from pruning that source's prior incremental state.
+- **Fixture isolation:** overrides should isolate normal machine discovery.
+  Grok ignores configured roots when `VIBE_USAGE_GROK_SESSIONS` is set. Pi
+  currently still validates and appends explicit `extraRoots` when
+  `VIBE_USAGE_PI_SESSION_DIRS` is set, so its tests must also pass only temporary
+  extra roots. Do not assume the override alone isolates those tests.
 
 ## Architecture: Two-Track Data Model
 
@@ -243,12 +274,28 @@ VIBE_USAGE_DEV=1 node ./bin/vibe-usage.js sync
 node -e "import('./src/parsers/<tool-id>.js').then(m => m.parse()).then(r => console.log(JSON.stringify(r, null, 2)))"
 ```
 
+Extra-root regression coverage:
+
+| Test file | Coverage |
+|---|---|
+| `test/cli.test.js` | Config commands, supported source ids, layout validation, legacy-config preservation |
+| `test/codex-roots.test.js` | Additive root discovery, path deduplication, live/archive and Multica layouts |
+| `test/grok.test.js` | Default-plus-extra stores, copied sessions, missing/unreadable configured roots |
+| `test/pi-compatible.test.js` | Extra-root layouts, overlapping paths, copied records, missing/unreadable roots |
+| `test/state.test.js` | Pruning only sources whose parsers succeeded |
+
+Run the focused checks locally:
+
+```bash
+node --test test/cli.test.js test/codex-roots.test.js test/grok.test.js test/pi-compatible.test.js test/state.test.js
+```
+
 Test hooks (env vars honored at module load, set them before importing):
 - `VIBE_USAGE_STATE_DIR` / `VIBE_USAGE_CONFIG_DIR` — redirect `state.js` / `config.js` away from the real `~/.vibe-usage` (used by `test/state.test.js`, `test/reset.test.js`)
 - Codex cache controls: `VIBE_USAGE_CACHE_DIR` redirects cache writes, `VIBE_USAGE_CODEX_CACHE=0` disables the optimization, `VIBE_USAGE_CODEX_WORK_BUDGET_MS` overrides the non-interactive build budget, and `VIBE_USAGE_CODEX_AUDIT_INTERVAL_MS` / `VIBE_USAGE_CODEX_AUDIT_MAX_BYTES` override rolling-audit bounds
 - Per-parser fixtures: `CODEX_HOME`, `VIBE_USAGE_ALMA_DB`, `VIBE_USAGE_CINDY_DIRS`, `VIBE_USAGE_GROK_SESSIONS`, `VIBE_USAGE_KIMI_CODE_DIR`, `VIBE_USAGE_KIMI_DIR`, `VIBE_USAGE_TRAE_CLI_SESSIONS`, `VIBE_USAGE_WORKBUDDY_DIRS`, `VIBE_USAGE_KIRO_LEGACY_TOKENS`, `VIBE_USAGE_DSH_SESSIONS`, `VIBE_USAGE_QODER_PROJECTS` / `VIBE_USAGE_QODER_DB` / `VIBE_USAGE_QODER_CN_PROJECTS` / `VIBE_USAGE_QODER_CN_DB` (the Qoder parser otherwise honors Qoder's own `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` for transcripts and `QODER_HOME` / `QODER_CN_HOME` for the IDE store). The Kimi Code parser resolves its data root as `VIBE_USAGE_KIMI_CODE_DIR` → `KIMI_CODE_HOME` (matching the CLI) → `~/.kimi-code`, and always merges the legacy `~/.kimi` store instead of either/or (`kimi migrate` drops usage records, so no double-count)
 - Claude fixtures: `VIBE_USAGE_CLAUDE_DIRS` replaces normal Claude root discovery with a `path.delimiter`-separated root list; `VIBE_USAGE_CLAUDE_DESKTOP_DIRS` overrides only the Claude Desktop user-data roots. The production parser scans `~/.claude`, `$CLAUDE_CONFIG_DIR`, data-bearing `~/.claude-*` profiles, and the per-session `.claude` roots created below Claude Desktop's `local-agent-mode-sessions`. Desktop Code already writes to the normal Claude Code root, while Cowork uses the private roots. Both remain source `claude-code`. The parser streams each JSONL file to its captured size, de-duplicates usage by API call identity (`message.id` + `requestId`, falling back to the line `uuid` when a record carries neither) keeping the most complete payload for each call, and returns `skipped` with warnings after any read failure so incremental state is not pruned. Claude Code writes one assistant line per content block - all sharing the call ids and repeating the same `usage` object - plus an early partial line while streaming, so a per-line key counted a single call once per block.
-- Pi-family/Cline/OpenClaw fixtures: `VIBE_USAGE_PI_SESSION_DIRS`, `VIBE_USAGE_OMP_SESSION_DIRS`, `VIBE_USAGE_CLINE_DIRS`, and `VIBE_USAGE_OPENCLAW_DIRS` replace normal discovery with `path.delimiter`-separated roots.
+- Pi-family/Cline/OpenClaw fixtures: `VIBE_USAGE_PI_SESSION_DIRS`, `VIBE_USAGE_OMP_SESSION_DIRS`, `VIBE_USAGE_CLINE_DIRS`, and `VIBE_USAGE_OPENCLAW_DIRS` replace normal discovery with `path.delimiter`-separated roots. Pi still appends explicit `extraRoots`, as described in [Additional Runtime Roots](#additional-runtime-roots).
 
 ## Versioning
 
