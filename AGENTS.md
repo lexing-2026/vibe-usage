@@ -55,7 +55,7 @@ vibe-usage/
 │   ├── sync.js                # Orchestrator: parse all → diff vs state → batch upload only new/changed
 │   ├── state.js               # ~/.vibe-usage/state.json: key→hash of uploaded items (incremental sync), clearState() for reset
 │   ├── api.js                 # HTTP client: ingest() (always gzip), requestDeviceCode()/pollDeviceCode() (device flow), deleteAllData(), fetchSettings()
-│   ├── summary.js             # `summary --days N`: GET /api/usage with the saved vbu_ key, render markdown (cost / tokens / by-model / by-project). Powers the SKILL.md "查询用量" entries.
+│   ├── summary.js             # `summary --days N`: GET /api/usage with the saved vbu_ key, render markdown (cost / tokens / by-tool / by-model / by-project, each table cost-desc). Powers the SKILL.md "查询用量" entries.
 │   ├── config.js              # ~/.vibe-usage/config.json (dev: config.dev.json)
 │   ├── init.js                # Setup flow (device-flow browser login by default; --manual-key for CI/headless, verify, initial sync, then installs the background service unless --no-daemon / non-TTY)
 │   ├── daemon.js              # 30-minute sync loop (foreground)

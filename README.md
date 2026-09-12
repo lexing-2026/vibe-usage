@@ -38,7 +38,7 @@ npx @vibe-cafe/vibe-usage init         # Re-run setup via browser login (also ho
 npx @vibe-cafe/vibe-usage init --manual-key <vbu_...>   # Skip browser, use pre-issued key (CI/headless)
 npx @vibe-cafe/vibe-usage sync         # Manual sync
 npx @vibe-cafe/vibe-usage sync --extra-codex-home /path/to/.codex  # Add another Codex Home for this run only
-npx @vibe-cafe/vibe-usage summary       # Print last 7 days as markdown (cost / tokens / by model / by project)
+npx @vibe-cafe/vibe-usage summary       # Print last 7 days as markdown (cost / tokens / by tool / by model / by project)
 npx @vibe-cafe/vibe-usage summary --days N  # Same, over the last N days (1-90)
 npx @vibe-cafe/vibe-usage daemon       # Continuous sync (every 30m, foreground)
 npx @vibe-cafe/vibe-usage daemon install    # Install background service (systemd/launchd/Task Scheduler)
