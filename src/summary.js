@@ -1,12 +1,18 @@
 import { loadConfig } from './config.js';
 import { getJson } from './api.js';
 import { failure } from './output.js';
+import { TOOLS } from './tools.js';
+
+// Server-side source ids are raw slugs ('claude-code'); TOOLS carries the
+// display names. A source the server knows but this CLI doesn't parse falls
+// back to its id rather than disappearing from the table.
+const TOOL_NAMES = new Map(TOOLS.map(t => [t.id, t.name]));
 
 export async function runSummary(args = []) {
   const days = parseDays(args);
   const config = loadConfig();
   if (!config?.apiKey) {
-    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage init`。'));
+    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage`。'));
     process.exit(1);
   }
 
@@ -36,17 +42,18 @@ function parseDays(args) {
   return v;
 }
 
-function render(data, days, apiUrl) {
+export function render(data, days, apiUrl) {
   const buckets = Array.isArray(data?.buckets) ? data.buckets : [];
   const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
   const dashboard = `${apiUrl}/usage`;
 
   if (buckets.length === 0) {
-    return `# Vibe Usage Summary (Last ${days} ${days === 1 ? 'day' : 'days'})\n\n暂无数据。运行 \`npx @vibe-cafe/vibe-usage sync\` 上传本地 token 记录。\n\n详情: ${dashboard}\n`;
+    return `# Vibe Usage Summary (Last ${days} ${days === 1 ? 'day' : 'days'})\n\n暂无数据。运行 \`npx @vibe-cafe/vibe-usage\` 上传本地 token 记录。\n\n详情: ${dashboard}\n`;
   }
 
   let totalCost = 0;
   let totalTokens = 0;
+  const bySource = new Map();
   const byModel = new Map();
   const byProject = new Map();
 
@@ -55,6 +62,7 @@ function render(data, days, apiUrl) {
     const tokens = Number(b.totalTokens ?? 0);
     totalCost += cost;
     totalTokens += tokens;
+    accumulate(bySource, b.source || 'unknown', { cost, tokens });
     accumulate(byModel, b.model, { cost, tokens });
     accumulate(byProject, b.project || 'unknown', { cost, tokens, sessions: 0 });
   }
@@ -72,6 +80,16 @@ function render(data, days, apiUrl) {
   lines.push(`# Vibe Usage Summary (Last ${days} ${days === 1 ? 'day' : 'days'})`);
   lines.push('');
   lines.push(`**总览**: $${totalCost.toFixed(2)} · ${formatTokens(totalTokens)} tokens · ${sessionsCount} sessions · ${activeHours.toFixed(1)}h active`);
+  lines.push('');
+
+  lines.push('## 按工具');
+  lines.push('');
+  lines.push('| 工具 | 费用 | Tokens | 占比 |');
+  lines.push('|---|---:|---:|---:|');
+  for (const [source, { cost, tokens }] of topN(bySource, 'cost', 8)) {
+    const pct = totalCost > 0 ? ((cost / totalCost) * 100).toFixed(0) : '0';
+    lines.push(`| ${TOOL_NAMES.get(source) || source} | $${cost.toFixed(2)} | ${formatTokens(tokens)} | ${pct}% |`);
+  }
   lines.push('');
 
   lines.push('## 按模型');

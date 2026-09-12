@@ -68,9 +68,15 @@ function decodeJwtSub(token) {
   }
 }
 
-// Under full sync many parsers hammer disk concurrently; cursor.com's CSV
-// export can still succeed but take >10s. A short timeout caused silent skips.
-const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+// cursor.com's CSV export is computed over the whole account, so it gets
+// slower the more usage the account has: heavy users time out on every run,
+// not intermittently. 10s (v0.7.11) and then 30s (#72) were both still short
+// enough to lock those accounts out permanently -- a user with ~13B tokens/30d
+// needed 120s to complete a single export, and every default-timeout run of
+// his silently uploaded nothing. Budget for the slow accounts; a healthy
+// export returns in a second or two, so this ceiling only costs wall-clock
+// time on the runs that were failing anyway.
+const DEFAULT_FETCH_TIMEOUT_MS = 120_000;
 const MAX_FETCH_TIMEOUT_MS = 2_147_483_647;
 
 export function resolveCursorFetchTimeout(value) {
@@ -81,6 +87,41 @@ export function resolveCursorFetchTimeout(value) {
 }
 
 const FETCH_TIMEOUT_MS = resolveCursorFetchTimeout(process.env.VIBE_USAGE_CURSOR_FETCH_TIMEOUT_MS);
+
+function usageNetworkError(error, signal) {
+  // Node fetch usually exposes only "fetch failed" at the top level. DNS,
+  // TLS and connection codes live in cause (or AggregateError.errors when
+  // both IPv4 and IPv6 fail). Report codes, not raw messages that may contain
+  // URLs with proxy credentials or authentication headers.
+  const codes = new Set();
+  const seen = new Set();
+  function visit(err) {
+    if (!err || typeof err !== 'object' || seen.has(err)) return;
+    seen.add(err);
+    if (typeof err.code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(err.code)) {
+      codes.add(err.code);
+    }
+    visit(err.cause);
+    if (Array.isArray(err.errors)) err.errors.forEach(visit);
+  }
+  visit(error);
+
+  const timedOut = error?.name === 'TimeoutError' || signal.reason?.name === 'TimeoutError';
+  const reason = timedOut
+    ? `timeout after ${FETCH_TIMEOUT_MS}ms`
+    : `network: ${[...codes].join(', ') || 'fetch failed'}`;
+  let hint = '请检查终端网络和代理配置；浏览器能访问 Cursor 不代表 Node.js 使用了相同代理。';
+  if (timedOut) {
+    hint = 'Cursor 用量导出超时，请稍后重试；可通过 VIBE_USAGE_CURSOR_FETCH_TIMEOUT_MS 增大导出等待时间。';
+  } else if (codes.has('ENOTFOUND') || codes.has('EAI_AGAIN')) {
+    hint = '域名解析失败，请检查 DNS 和终端代理配置。';
+  } else if ([...codes].some(code => /CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS_/.test(code))) {
+    hint = 'TLS 证书校验失败，请检查系统时间及代理或公司网络的 CA 证书配置。';
+  }
+  const err = new Error(`Cursor usage export skipped (${reason}). ${hint}`);
+  err.skip = true;
+  return err;
+}
 
 async function fetchUsageCsv(token) {
   const url = `${(process.env.CURSOR_WEB_BASE_URL?.trim() || 'https://cursor.com').replace(/\/+$/, '')}/api/dashboard/export-usage-events-csv?strategy=tokens`;
@@ -110,20 +151,19 @@ async function fetchUsageCsv(token) {
   const failures = [];
   for (const headers of attempts) {
     let resp;
+    const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
     try {
       resp = await fetch(url, {
         headers: { ...baseHeaders, ...headers },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal,
       });
+      // The export may time out or disconnect after headers have arrived.
+      // Keep body consumption under the same deadline and soft-skip handling.
+      if (resp.ok) return await resp.text();
     } catch (e) {
-      // Hard-fail on network/timeout: stop trying further headers (won't fix
-      // a downed host) and signal a soft skip to the caller.
-      const reason = e.name === 'TimeoutError' ? 'timeout' : `network: ${e.message}`;
-      const err = new Error(`Cursor usage export skipped (${reason})`);
-      err.skip = true;
-      throw err;
+      // Changing credentials cannot repair a network failure.
+      throw usageNetworkError(e, signal);
     }
-    if (resp.ok) return await resp.text();
     failures.push(`${resp.status} ${resp.statusText}`);
     // Only auth rejections are worth retrying with different credentials.
     // 429/5xx are transient server-side states — soft-skip like network errors
@@ -198,7 +238,7 @@ export async function parse() {
   try {
     csv = await fetchUsageCsv(token);
   } catch (err) {
-    // Network/timeout → silent skip (avoid noisy daemon logs every 5 min).
+    // Network/timeout → skip with diagnostics (quiet sync suppresses these).
     // Auth failure → bubble up so user sees they need to re-login in Cursor.
     // Tell sync.js this was not a successful empty snapshot so it preserves
     // Cursor's incremental state instead of pruning it as dead history.

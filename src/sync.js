@@ -15,16 +15,32 @@ import { success, failure, warn, arrow, link, dim } from './output.js';
 const BATCH_SIZE = 100;
 const SESSION_BATCH_SIZE = 500;
 
+/** Coarse human duration: "45s" / "2m10s" / "1h 20m". */
+export function formatDuration(seconds) {
+  const secs = Math.max(0, Math.round(seconds));
+  if (secs < 60) return `${secs}s`;
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  return s > 0 ? `${m}m${s}s` : `${m}m`;
+}
+
+/**
+ * Remaining upload time from batches already finished. Measured, never guessed:
+ * returns null until at least one batch has completed, because a first-sync
+ * backlog and a steady-state trickle differ by three orders of magnitude and
+ * any a-priori rate would be wrong for one of them.
+ */
+export function estimateRemainingSeconds({ elapsedMs, doneBatches, totalBatches }) {
+  if (!(elapsedMs > 0) || doneBatches < 1 || totalBatches <= doneBatches) return null;
+  return ((elapsedMs / doneBatches) * (totalBatches - doneBatches)) / 1000;
+}
+
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-/** Hide only Cursor's intentional transient fetch soft-skip in quiet (daemon) syncs. */
-export function shouldSuppressParserWarning(source, message, quiet) {
-  if (!quiet) return false;
-  return source === 'cursor' && message.startsWith('cursor: Cursor usage export skipped (');
 }
 
 export function resolveUploadProjectSetting(settings) {
@@ -86,7 +102,7 @@ export async function runSync({
 } = {}) {
   const config = loadConfig();
   if (!config?.apiKey) {
-    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage init`。'));
+    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage`。'));
     if (throws) throw new Error('NOT_CONFIGURED');
     process.exit(1);
   }
@@ -184,13 +200,17 @@ export async function runSync({
     if (indexing) {
       parserProgress.push({ source, ...indexing });
     }
+    // Parser warnings always reach stderr, including quiet (daemon) runs: the
+    // daemon log is the only trail a background failure leaves. Cursor's fetch
+    // soft-skip used to be filtered out here to keep that log tidy, which made
+    // a permanently failing export indistinguishable from a healthy one -- the
+    // tool still listed as "installed" while it had never uploaded a byte.
     for (const message of warnings) {
-      if (shouldSuppressParserWarning(source, message, quiet)) continue;
       process.stderr.write(`${dim(`  ${message}`)}\n`);
     }
-    // A parser may deliberately suppress a transient error (Cursor network
-    // timeout) to keep daemon logs quiet. Its empty result is not proof that
-    // its prior data disappeared, so it must not be pruned this run.
+    // A parser may downgrade a transient error (Cursor network timeout) to a
+    // warning instead of throwing. Its empty result is not proof that its prior
+    // data disappeared, so it must not be pruned this run.
     if (!skipped) okSources.add(source);
     for (const bucket of buckets) allBuckets.push(bucket);
     for (const session of sessions) allSessions.push(session);
@@ -323,6 +343,20 @@ export async function runSync({
   const totalBatches = Math.max(bucketBatches, sessionBatches, 1);
   const syncClient = createSyncClient({ defaultSurface: surface, hostname: host });
 
+  // Say up front how much is about to go up. A first sync (or one that
+  // backfills after a parser was broken) can be thousands of batches, and with
+  // only a per-batch progress line the user cannot tell a long upload from a
+  // hung one -- which is exactly how a silently failing parser stayed hidden.
+  if (!quiet) {
+    const pending = [`${allBucketsToSend.length} buckets`];
+    if (allSessionsToSend.length > 0) pending.push(`${allSessionsToSend.length} sessions`);
+    const batchNote = totalBatches > 1 ? `，分 ${totalBatches} 批` : '';
+    console.log(dim(`  待上传 ${pending.join(' · ')}${batchNote}`));
+  }
+
+  let uploadedBytes = 0;
+  const uploadStartedAt = Date.now();
+
   try {
     for (let batchIdx = 0; batchIdx < totalBatches; batchIdx++) {
       const batch = allBucketsToSend.slice(batchIdx * BATCH_SIZE, (batchIdx + 1) * BATCH_SIZE);
@@ -330,13 +364,25 @@ export async function runSync({
       const batchNum = batchIdx + 1;
       const prefix = totalBatches > 1 ? `  ${dim(`[${batchNum}/${totalBatches}]`)} 上传中 ` : '  上传中 ';
 
+      // Only measured batches feed the estimate, so the first batch shows no
+      // ETA rather than a made-up one.
+      const remaining = estimateRemainingSeconds({
+        elapsedMs: Date.now() - uploadStartedAt,
+        doneBatches: batchIdx,
+        totalBatches,
+      });
+      const etaNote = remaining === null ? '' : ` · 预计还需 ${formatDuration(remaining)}`;
+
+      let batchBytes = 0;
       const result = await ingest(apiUrl, config.apiKey, batch, {
         client: forBatch(syncClient, batchIdx, totalBatches),
         onProgress(sent, total) {
+          batchBytes = total;
           const pct = Math.round((sent / total) * 100);
-          process.stdout.write(`\r${prefix}${dim(`${formatBytes(sent)}/${formatBytes(total)} (${pct}%)`)}\x1b[K`);
+          process.stdout.write(`\r${prefix}${dim(`${formatBytes(sent)}/${formatBytes(total)} (${pct}%)${etaNote}`)}\x1b[K`);
         },
       }, batchSessions.length > 0 ? batchSessions : undefined);
+      uploadedBytes += batchBytes;
       totalIngested += result.ingested ?? batch.length;
       totalSessionsSynced += result.sessions ?? 0;
       const batchUnknownSources = new Set(result.dropped?.unknownSources || []);
@@ -381,6 +427,10 @@ export async function runSync({
     const syncParts = [`${totalIngested} buckets`];
     if (totalSessionsSynced > 0) syncParts.push(`${totalSessionsSynced} sessions`);
     console.log(success(`已同步 ${syncParts.join(' · ')}`));
+    if (!quiet && uploadedBytes > 0) {
+      const elapsed = (Date.now() - uploadStartedAt) / 1000;
+      console.log(dim(`  上传 ${formatBytes(uploadedBytes)}（已压缩），用时 ${formatDuration(elapsed)}`));
+    }
 
     if (totalDroppedBuckets > 0) {
       const reasons = [];
@@ -401,13 +451,7 @@ export async function runSync({
       const totalActive = allSessionsToSend.reduce((s, x) => s + x.activeSeconds, 0);
       const totalDuration = allSessionsToSend.reduce((s, x) => s + x.durationSeconds, 0);
       const totalMsgs = allSessionsToSend.reduce((s, x) => s + x.messageCount, 0);
-      const fmtTime = (secs) => {
-        if (secs < 60) return `${secs}s`;
-        const h = Math.floor(secs / 3600);
-        const m = Math.floor((secs % 3600) / 60);
-        return h > 0 ? (m > 0 ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
-      };
-      console.log(dim(`  活跃 ${fmtTime(totalActive)} / 总时长 ${fmtTime(totalDuration)} · ${totalMsgs} 条消息`));
+      console.log(dim(`  活跃 ${formatDuration(totalActive)} / 总时长 ${formatDuration(totalDuration)} · ${totalMsgs} 条消息`));
     }
 
     if (!quiet) {

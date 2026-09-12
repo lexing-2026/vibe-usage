@@ -30,7 +30,7 @@ export async function runReset(args = [], deps = {}) {
   const hostOnly = args.includes('--local') || args.includes('--host');
   const config = loadConfig();
   if (!config?.apiKey) {
-    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage init`。'));
+    console.error(failure('尚未配置，请先运行 `npx @vibe-cafe/vibe-usage`。'));
     process.exit(1);
   }
 

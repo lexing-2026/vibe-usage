@@ -4,20 +4,6 @@ import { homedir } from 'node:os';
 import { aggregateToBuckets, extractSessions } from './aggregate.js';
 import { queryDbJson, sqliteUnavailableError, isSqliteUnavailableError } from './sqlite.js';
 
-/**
- * Resolve all ZCode DB paths: default + extras.
- */
-function resolveDbPaths(extraRoots = []) {
-  const paths = [join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite')];
-  for (const root of extraRoots) {
-    if (root) {
-      const candidate = join(root, 'cli', 'db', 'db.sqlite');
-      if (!paths.includes(candidate)) paths.push(candidate);
-    }
-  }
-  return paths.filter(existsSync);
-}
-
 // ZCode (z.ai / Zhipu's coding agent) stores everything in a SQLite database
 // at ~/.zcode/cli/db/db.sqlite. The `message` table is the canonical source:
 // each row is one user or assistant message, with an assistant message carrying
@@ -25,6 +11,7 @@ function resolveDbPaths(extraRoots = []) {
 // than the parallel `model_usage` ledger because `message` gives us BOTH session
 // timing (user + assistant rows) and token usage in one pass, with the project
 // path attached to each message.
+const DB_PATH = join(homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
 
 /**
  * Project name from a ZCode message's path. ZCode records both `cwd` and `root`;
@@ -38,28 +25,9 @@ function projectName(root, cwd, sessionDir) {
   return basename(String(p).replace(/[/\\]+$/, '')) || 'unknown';
 }
 
-export async function parse({ extraRoots = [] } = {}) {
-  const dbPaths = resolveDbPaths(extraRoots);
-  if (dbPaths.length === 0) return { buckets: [], sessions: [] };
+export async function parse() {
+  if (!existsSync(DB_PATH)) return { buckets: [], sessions: [] };
 
-  const allEntries = [];
-  const allSessions = [];
-
-  for (const dbPath of dbPaths) {
-    try {
-      const result = parseFromDb(dbPath);
-      allEntries.push(...(result.buckets || []));
-      allSessions.push(...(result.sessions || []));
-    } catch (err) {
-      if (isSqliteUnavailableError(err)) throw err;
-      process.stderr.write(`warn: zcode parse failed (${dbPath}): ${err.message}\n`);
-    }
-  }
-
-  return { buckets: aggregateToBuckets(allEntries), sessions: allSessions };
-}
-
-function parseFromDb(dbPath) {
   // Join each message to its session so we can fall back to the session's
   // directory when an individual message has no path (older rows, lite agents).
   const query = `SELECT
@@ -76,7 +44,7 @@ function parseFromDb(dbPath) {
 
   let rows;
   try {
-    rows = queryDbJson(dbPath, query);
+    rows = queryDbJson(DB_PATH, query);
   } catch (err) {
     if (isSqliteUnavailableError(err)) throw sqliteUnavailableError('ZCode');
     throw err;

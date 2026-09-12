@@ -12,7 +12,8 @@ import {
   resolveCachedUploadProjectSetting,
   resolveUploadProjectSetting,
   mapWithConcurrency,
-  shouldSuppressParserWarning,
+  formatDuration,
+  estimateRemainingSeconds,
 } from '../src/sync.js';
 import { normalizeParserResult } from '../src/parsers/contract.js';
 
@@ -70,20 +71,161 @@ test('temporary extra Codex home overrides persisted config only for this run', 
   assert.equal(resolveCodexExtraHome('/persisted/.codex', undefined), '/persisted/.codex');
 });
 
-test('shouldSuppressParserWarning hides only Cursor transient fetch skips in quiet mode', () => {
-  assert.equal(
-    shouldSuppressParserWarning('cursor', 'cursor: Cursor usage export skipped (timeout)', true),
-    true,
-  );
-  assert.equal(
-    shouldSuppressParserWarning('cursor', 'cursor: Cursor usage export skipped (timeout)', false),
-    false,
-  );
-  assert.equal(shouldSuppressParserWarning('dsh', 'dsh: cannot read session-8', true), false);
-  assert.equal(
-    shouldSuppressParserWarning('cursor', 'cursor: cannot read usage database (locked)', true),
-    false,
-  );
+// A quiet (daemon) sync used to drop Cursor's fetch soft-skip warning on the
+// floor, so an export that failed on every single run left no trace anywhere:
+// daemon.log empty, `status` still reporting the tool as installed. Warnings
+// must reach stderr regardless of quiet, or a permanent failure is invisible.
+// Without an up-front total, a multi-thousand-batch first sync is
+// indistinguishable from a hang: the per-batch line only ever shows one batch.
+test('a sync announces how much it is about to upload', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-pending-line-'));
+  const configDir = join(root, 'config');
+  const stateDir = join(root, 'state');
+  const homeDir = join(root, 'home');
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+
+  try {
+    await withServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/api/usage/settings') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ uploadProject: true }));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/api/usage/ingest') {
+        req.on('data', () => {});
+        req.on('end', () => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ ingested: 250, sessions: 0 }));
+        });
+        return;
+      }
+      res.writeHead(404).end();
+    }, async apiUrl => {
+      writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+        apiKey: 'vbu_pending_line_test',
+        apiUrl,
+        hostname: 'pending-line-test',
+      }));
+      const command = `
+        import { parsers } from './src/parsers/index.js';
+        for (const source of Object.keys(parsers)) delete parsers[source];
+        parsers['pending-line-test'] = async () => ({
+          buckets: Array.from({ length: 250 }, (_, index) => ({
+            source: 'pending-line-test',
+            model: 'model-' + index,
+            project: 'project',
+            bucketStart: '2026-09-09T00:00:00.000Z',
+            inputTokens: index + 1,
+            outputTokens: 0,
+            cachedInputTokens: 0,
+            reasoningOutputTokens: 0,
+            totalTokens: index + 1,
+          })),
+          sessions: [],
+        });
+        const { runSync } = await import('./src/sync.js');
+        await runSync({ throws: true });
+      `;
+      const { stdout } = await execFileAsync(
+        process.execPath,
+        ['--input-type=module', '-e', command],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: homeDir,
+            VIBE_USAGE_DEV: '0',
+            VIBE_USAGE_CONFIG_DIR: configDir,
+            VIBE_USAGE_STATE_DIR: stateDir,
+          },
+        },
+      );
+      assert.match(stdout, /待上传 250 buckets，分 3 批/);
+      assert.match(stdout, /上传 .+（已压缩），用时/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a quiet sync still writes a parser skip warning to stderr', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-quiet-warning-'));
+  const configDir = join(root, 'config');
+  const stateDir = join(root, 'state');
+  const homeDir = join(root, 'home');
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+
+  try {
+    await withServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/api/usage/settings') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ uploadProject: true }));
+        return;
+      }
+      res.writeHead(404).end();
+    }, async apiUrl => {
+      writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+        apiKey: 'vbu_quiet_warning_test',
+        apiUrl,
+        hostname: 'quiet-warning-test',
+      }));
+      const command = `
+        import { parsers } from './src/parsers/index.js';
+        for (const source of Object.keys(parsers)) delete parsers[source];
+        parsers['cursor'] = async () => ({
+          buckets: [],
+          sessions: [],
+          skipped: true,
+          warnings: ['cursor: Cursor usage export skipped (timeout after 120000ms). …'],
+        });
+        const { runSync } = await import('./src/sync.js');
+        await runSync({ throws: true, quiet: true });
+      `;
+      const { stderr } = await execFileAsync(
+        process.execPath,
+        ['--input-type=module', '-e', command],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            HOME: homeDir,
+            VIBE_USAGE_DEV: '0',
+            VIBE_USAGE_CONFIG_DIR: configDir,
+            VIBE_USAGE_STATE_DIR: stateDir,
+          },
+        },
+      );
+      assert.match(stderr, /Cursor usage export skipped/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('formatDuration renders seconds, minutes and hours', () => {
+  assert.equal(formatDuration(0), '0s');
+  assert.equal(formatDuration(59), '59s');
+  assert.equal(formatDuration(60), '1m');
+  assert.equal(formatDuration(90), '1m30s');
+  assert.equal(formatDuration(600), '10m');
+  assert.equal(formatDuration(3600), '1h');
+  assert.equal(formatDuration(3660), '1h 1m');
+  // Unchanged from the session-summary formatter this replaced.
+  assert.equal(formatDuration(251880), '69h 58m');
+  assert.equal(formatDuration(-5), '0s');
+});
+
+// The estimate is extrapolated from batches that actually finished. A first
+// sync and a steady-state trickle differ by orders of magnitude, so any
+// a-priori rate would be wrong for one of them -- report nothing instead.
+test('remaining-time estimate only extrapolates from completed batches', () => {
+  assert.equal(estimateRemainingSeconds({ elapsedMs: 5000, doneBatches: 0, totalBatches: 53 }), null);
+  assert.equal(estimateRemainingSeconds({ elapsedMs: 0, doneBatches: 3, totalBatches: 53 }), null);
+  assert.equal(estimateRemainingSeconds({ elapsedMs: 5000, doneBatches: 53, totalBatches: 53 }), null);
+  assert.equal(estimateRemainingSeconds({ elapsedMs: 5000, doneBatches: 1, totalBatches: 53 }), 260);
+  assert.equal(estimateRemainingSeconds({ elapsedMs: 10_000, doneBatches: 2, totalBatches: 4 }), 10);
 });
 
 test('mapWithConcurrency preserves order and bounds in-flight work', async () => {

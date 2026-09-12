@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
+import childProcess from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import {
   listDbCascades,
   parseGenMetadataBlob,
@@ -14,7 +16,9 @@ import {
   readDbWorkspaceUri,
   resolveUsageTimestamp,
 } from '../src/parsers/antigravity-db.js';
-import { parse } from '../src/parsers/antigravity.js';
+import { parse, parseWinProcessList } from '../src/parsers/antigravity.js';
+import { antigravityConversationDirs, validateExtraRoot } from '../src/extra-roots.js';
+import { findAntigravityDataDirs } from '../src/tools.js';
 
 // ── Minimal protobuf encoder (mirrors the wire format the decoder reads) ──
 function varint(n) {
@@ -246,7 +250,8 @@ test('Gemini 3.7 CLI usage without blob createdAt is timestamped from steps.idx'
   }
 });
 
-test('parse merges an explicit Antigravity home without changing the default roots', async (t) => {
+for (const store of ['antigravity-cli', 'antigravity-ide']) {
+test(`parse merges an explicit ${store} home`, async (t) => {
   let DatabaseSync;
   try {
     ({ DatabaseSync } = await import('node:sqlite'));
@@ -258,7 +263,7 @@ test('parse merges an explicit Antigravity home without changing the default roo
   const root = mkdtempSync(join(tmpdir(), 'vibe-usage-antigravity-extra-root-'));
   const emptyDefault = join(root, 'default-conversations');
   const extraHome = join(root, 'isolated-home');
-  const conversationsDir = join(extraHome, '.gemini', 'antigravity-cli', 'conversations');
+  const conversationsDir = join(extraHome, '.gemini', store, 'conversations');
   mkdirSync(emptyDefault, { recursive: true });
   mkdirSync(conversationsDir, { recursive: true });
   const db = new DatabaseSync(join(conversationsDir, 'isolated-cascade.db'));
@@ -291,6 +296,142 @@ test('parse merges an explicit Antigravity home without changing the default roo
     if (previous === undefined) delete process.env.VIBE_USAGE_ANTIGRAVITY_DIRS;
     else process.env.VIBE_USAGE_ANTIGRAVITY_DIRS = previous;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+}
+
+test('Antigravity detection and extra roots recognize a standalone IDE store', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-antigravity-ide-roots-'));
+  const ideDir = join(root, '.gemini', 'antigravity-ide', 'conversations');
+  mkdirSync(ideDir, { recursive: true });
+  try {
+    assert.ok(antigravityConversationDirs(root).includes(ideDir));
+    assert.ok(findAntigravityDataDirs([root]).includes(dirname(ideDir)));
+    assert.equal(validateExtraRoot('antigravity', root).ok, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function legacyFixture(t, stores) {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-antigravity-legacy-'));
+  const dirs = antigravityConversationDirs(root);
+  for (const dir of dirs) mkdirSync(dir, { recursive: true });
+  for (const [storeIndex, ids] of stores) {
+    for (const id of ids) writeFileSync(join(dirs[storeIndex], `${id}.pb`), 'opaque fixture');
+  }
+  const previous = process.env.VIBE_USAGE_ANTIGRAVITY_DIRS;
+  process.env.VIBE_USAGE_ANTIGRAVITY_DIRS = dirs.join(delimiter);
+  t.after(() => {
+    if (previous === undefined) delete process.env.VIBE_USAGE_ANTIGRAVITY_DIRS;
+    else process.env.VIBE_USAGE_ANTIGRAVITY_DIRS = previous;
+    rmSync(root, { recursive: true, force: true });
+  });
+}
+
+function mockServers(t, servers) {
+  const processMock = t.mock.method(childProcess, 'execSync', command => {
+    if (command.includes('ps aux')) {
+      return servers.map(({ pid, token }) => `user ${pid} 0 0 /Applications/Antigravity IDE.app/language_server --csrf_token ${token}`).join('\n');
+    }
+    if (command.includes('Get-CimInstance') || command.includes('wmic process')) {
+      return servers.map(({ pid, token }) => `---\nProcessId=${pid}\nCommandLine=Antigravity IDE/language_server --csrf_token ${token}`).join('\n');
+    }
+    if (command.includes('lsof')) {
+      const pid = command.match(/-p (\d+)/)?.[1];
+      const server = servers.find(server => String(server.pid) === pid);
+      return server ? `language_server ${pid} user TCP 127.0.0.1:${server.port} (LISTEN)` : '';
+    }
+    if (command.includes('netstat')) {
+      return servers.map(({ pid, port }) => `TCP 127.0.0.1:${port} 0.0.0.0:0 LISTENING ${pid}`).join('\n');
+    }
+    throw new Error(`Unexpected subprocess: ${command}`);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    processMock.mock.restore();
+    syncBuiltinESMExports();
+  });
+}
+
+function legacyTrajectory(id, input = 100) {
+  return {
+    trajectory: {
+      generatorMetadata: [{ chatModel: {
+        responseModel: 'gemini-3-pro-high',
+        chatStartMetadata: { createdAt: '2026-09-07T06:30:02Z' },
+        retryInfos: [{ usage: { responseId: `response-${id}`, inputTokens: input, outputTokens: 5 } }],
+      } }],
+      steps: [
+        { metadata: { source: 'CORTEX_STEP_SOURCE_USER_EXPLICIT', createdAt: '2026-09-07T06:30:00Z' } },
+        { metadata: { source: 'CORTEX_STEP_SOURCE_MODEL', createdAt: '2026-09-07T06:30:02Z' } },
+      ],
+    },
+  };
+}
+
+test('legacy IDE conversations are read from the owning server when the App is also running', async (t) => {
+  legacyFixture(t, [[0, ['app-chat', 'copied-chat']], [2, ['ide-chat', 'copied-chat']]]);
+  const servers = [
+    { pid: 123, port: 40123, token: 'aaa' },
+    { pid: 456, port: 40456, token: 'bbb' },
+  ];
+  mockServers(t, servers);
+  const successful = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.ok(options.signal instanceof AbortSignal);
+    assert.equal(url.hostname, '127.0.0.1');
+    const server = servers.find(server => String(server.port) === url.port);
+    assert.equal(options.headers['X-Codeium-Csrf-Token'], server.token);
+    if (url.pathname.endsWith('/GetWorkspaceInfos')) return Response.json({});
+    const { cascadeId } = JSON.parse(options.body);
+    if (server.pid === 123 && cascadeId === 'ide-chat') return new Response('', { status: 404 });
+    successful.push(cascadeId);
+    return Response.json(legacyTrajectory(cascadeId));
+  });
+
+  const result = await parse();
+  assert.deepEqual(successful.sort(), ['app-chat', 'copied-chat', 'ide-chat']);
+  assert.equal(result.skipped, undefined);
+  assert.equal(result.buckets.reduce((sum, b) => sum + b.inputTokens, 0), 300);
+  assert.equal(result.sessions.length, 3);
+  assert.equal(result.sessions.reduce((sum, session) => sum + session.messageCount, 0), 6);
+});
+
+test('a closed IDE soft-skips unreadable legacy history with a diagnostic', async (t) => {
+  legacyFixture(t, [[2, ['ide-chat']]]);
+  mockServers(t, []);
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('No server should be queried'); });
+  const result = await parse();
+  assert.equal(result.skipped, true);
+  assert.deepEqual(result.buckets, []);
+  assert.match(result.warnings[0], /1 个旧格式会话.*Antigravity IDE\/App/);
+});
+
+test('partial legacy reads retain available usage and protect the source from pruning', async (t) => {
+  legacyFixture(t, [[2, ['available', 'unavailable']]]);
+  mockServers(t, [{ pid: 123, port: 40123, token: 'aaa' }]);
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.pathname.endsWith('/GetWorkspaceInfos')) return Response.json({});
+    const { cascadeId } = JSON.parse(options.body);
+    if (cascadeId === 'unavailable') throw new Error('RPC connection failed');
+    return Response.json(legacyTrajectory(cascadeId));
+  });
+  const result = await parse();
+  assert.equal(result.skipped, true);
+  assert.equal(result.buckets[0].inputTokens, 100);
+  assert.equal(result.sessions.length, 1);
+  assert.match(result.warnings[0], /1 个旧格式会话/);
+});
+
+test('Windows discovery keeps both App and IDE servers in CIM and legacy WMIC output', () => {
+  const app = 'Antigravity/language_server.exe --csrf_token aaa';
+  const ide = 'Antigravity IDE/language_server.exe --csrf_token bbb';
+  for (const output of [
+    `---\nProcessId=123\nCommandLine=${app}\n---\nProcessId=456\nCommandLine=${ide}`,
+    `CommandLine=${app}\nProcessId=123\nCommandLine=${ide}\nProcessId=456`,
+  ]) {
+    assert.deepEqual(parseWinProcessList(output), [{ pid: '123', csrfToken: 'aaa' }, { pid: '456', csrfToken: 'bbb' }]);
   }
 });
 

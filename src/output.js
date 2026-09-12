@@ -41,6 +41,17 @@ export const arrow = (msg) => `${cyan('→')} ${msg}`;
 
 export const divider = () => dim('─'.repeat(48));
 
+/**
+ * One dim advisory line pointing at the simpler way to do what the user just
+ * did. Printed only when a human is watching: the Mac and Windows apps drive
+ * `sync` through a pipe and read stdout as the result / error text, so an
+ * extra line must never reach them. VIBE_USAGE_FORCE_HINTS=1 is for tests.
+ */
+export function hint(msg) {
+  if (!process.stdout.isTTY && process.env.VIBE_USAGE_FORCE_HINTS !== '1') return;
+  console.log(dim(`提示: ${msg}`));
+}
+
 /** Print a blank line. */
 export const nl = () => console.log();
 

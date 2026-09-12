@@ -1,9 +1,10 @@
 import { accessSync, closeSync, constants, openSync, readSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import { openCodeStore } from './opencode-roots.js';
 import { codexSessionDirs } from './codex-roots.js';
 
-export const EXTRA_ROOT_SOURCES = ['antigravity', 'claude', 'codex', 'grok', 'opencode', 'pi-coding-agent', 'zcode'];
+export const EXTRA_ROOT_SOURCES = ['antigravity', 'claude-code', 'codex', 'grok', 'opencode', 'pi-coding-agent'];
 
 // Probing a candidate Pi store has three outcomes, never two: a confirmed
 // session, a directory proven to hold none, and one that could not be read.
@@ -86,6 +87,7 @@ export function antigravityConversationDirs(value) {
   return [
     join(root, '.gemini', 'antigravity', 'conversations'),
     join(root, '.gemini', 'antigravity-cli', 'conversations'),
+    join(root, '.gemini', 'antigravity-ide', 'conversations'),
   ];
 }
 
@@ -282,25 +284,6 @@ export function claudeProjectsDir(value) {
   return [join(root, 'projects'), join(root, 'transcripts')].filter(isReadableDirectory);
 }
 
-export function opencodeDbPath(value) {
-  const root = normalizeExtraRoot(value);
-  const db = join(root, 'opencode.db');
-  const msgDir = join(root, 'storage', 'message');
-  if (isReadableDirectory(root) && (accessSync(db, constants.R_OK) !== undefined || isReadableDirectory(msgDir))) {
-    return db;
-  }
-  return null;
-}
-
-export function zcodeDbPath(value) {
-  const root = normalizeExtraRoot(value);
-  const db = join(root, 'cli', 'db', 'db.sqlite');
-  if (isReadableDirectory(root) && accessSync(db, constants.R_OK) !== undefined) {
-    return db;
-  }
-  return null;
-}
-
 export function validateExtraRoot(source, value) {
   if (!EXTRA_ROOT_SOURCES.includes(source)) {
     return { ok: false, path: value, reason: `不支持的工具: ${source}` };
@@ -314,7 +297,7 @@ export function validateExtraRoot(source, value) {
       reason: '需要是 Codex Home，或包含 */*/codex-home 的 Multica 容器',
     };
   }
-  if (source === 'claude') {
+  if (source === 'claude-code') {
     const dirs = claudeProjectsDir(path);
     return {
       ok: dirs.length > 0,
@@ -323,20 +306,12 @@ export function validateExtraRoot(source, value) {
     };
   }
   if (source === 'opencode') {
-    const db = opencodeDbPath(path);
-    return {
-      ok: db !== null,
-      path,
-      reason: '需要包含 opencode.db 或 storage/message/',
-    };
-  }
-  if (source === 'zcode') {
-    const db = zcodeDbPath(path);
-    return {
-      ok: db !== null,
-      path,
-      reason: '需要包含 cli/db/db.sqlite',
-    };
+    try {
+      return { ok: openCodeStore(path) !== null, path,
+        reason: '需要包含可读的 opencode.db 或 storage/message/' };
+    } catch (err) {
+      return { ok: false, path, reason: `无法读取 OpenCode 目录: ${err.message}` };
+    }
   }
   if (source === 'pi-coding-agent') {
     // piSessionsDir only returns a directory it has already confirmed by

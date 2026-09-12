@@ -134,10 +134,49 @@ test('daemon service commands require manual persistence instead of ignoring a t
   }
 });
 
-test('help documents the extra Codex home option', () => {
-  const result = run('--help');
+test('help --all documents the extra Codex home option', () => {
+  const result = run('help', '--all');
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /--extra-codex-home <path>/);
+  assert.match(result.stdout, /--no-daemon/);
+});
+
+test('default help advertises the bare command and hides the command matrix', () => {
+  const result = run('--help');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /npx @vibe-cafe\/vibe-usage\n/);
+  assert.match(result.stdout, /help --all/);
+  assert.doesNotMatch(result.stdout, /daemon restart/);
+  assert.doesNotMatch(result.stdout, /--extra-codex-home/);
+});
+
+test('--no-daemon is accepted as a global flag', () => {
+  const result = run('--no-daemon', '--help');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /vibe-usage - Vibe Usage Tracker/);
+});
+
+test('legacy --key prints a rename hint only when a human is watching', () => {
+  // spawnSync pipes stdout, exactly how the desktop apps run the CLI: no hint.
+  const piped = run('--key', 'vbu_compat_test', '--help');
+  assert.equal(piped.status, 0, piped.stderr);
+  assert.doesNotMatch(piped.stdout, /提示:/);
+
+  const forced = runWithEnv(['--key', 'vbu_compat_test', '--help'], { VIBE_USAGE_FORCE_HINTS: '1' });
+  assert.equal(forced.status, 0, forced.stderr);
+  assert.match(forced.stdout, /提示: --key 已改名 --manual-key/);
+});
+
+test('unconfigured sync points at the bare command, not init', () => {
+  const root = mkdtempSync(join(tmpdir(), 'vibe-usage-cli-unconfigured-'));
+  try {
+    const result = runWithEnv(['sync'], { VIBE_USAGE_CONFIG_DIR: root });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /请先运行 `npx @vibe-cafe\/vibe-usage`。/);
+    assert.doesNotMatch(result.stderr, /vibe-usage init/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('status displays the persisted extra Codex home and detects Codex there', () => {
@@ -257,4 +296,47 @@ test('config add-root rejects unsupported tools and invalid layouts', () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('Claude Code and OpenCode added roots route from saved config into their parsers', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cli-claude-opencode-'));
+  const configDir = join(root, 'config'), claude = join(root, 'claude'), opencode = join(root, 'opencode');
+  mkdirSync(join(claude, 'projects', 'project'), { recursive: true });
+  writeFileSync(join(claude, 'projects', 'project', 'session.jsonl'), JSON.stringify({ type: 'assistant',
+    timestamp: '2026-09-12T00:00:00Z', cwd: '/work/project', uuid: 'one',
+    message: { id: 'call', model: 'test-model', usage: { input_tokens: 10, output_tokens: 2 } } }) + '\n');
+  mkdirSync(join(opencode, 'storage', 'message', 'ses_one'), { recursive: true });
+  writeFileSync(join(opencode, 'storage', 'message', 'ses_one', 'reply.json'), JSON.stringify({ id: 'reply',
+    role: 'assistant', time: { created: 1789171200000 }, modelID: 'test-model', tokens: { input: 10, output: 2 } }));
+  const env = { ...process.env, VIBE_USAGE_CONFIG_DIR: configDir,
+    VIBE_USAGE_CLAUDE_DIRS: join(root, 'no-default-claude'), VIBE_USAGE_OPENCODE_DIRS: join(root, 'no-default-opencode') };
+  try {
+    for (const [source, path] of [['claude-code', claude], ['opencode', opencode]]) {
+      const result = runWithEnv(['config', 'add-root', source, path], env);
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const config = JSON.parse(readFileSync(join(configDir, 'config.json'), 'utf8'));
+    assert.deepEqual(config.extraRoots, { 'claude-code': [claude], opencode: [opencode] });
+    const code = `import {loadConfig} from './src/config.js';
+      import {extraRootList} from './src/extra-roots.js';
+      const config=loadConfig(); const out={};
+      for(const source of ['claude-code','opencode']) {
+        const {parse}=await import('./src/parsers/'+source+'.js');
+        out[source]=(await parse({extraRoots:extraRootList(config.extraRoots?.[source])})).buckets.length;
+      } console.log(JSON.stringify(out));`;
+    const parsed = spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+      cwd: join(testDir, '..'), env, encoding: 'utf8' });
+    assert.equal(parsed.status, 0, parsed.stderr);
+    assert.deepEqual(JSON.parse(parsed.stdout), { 'claude-code': 1, opencode: 1 });
+    const status = runWithEnv(['status'], env);
+    assert.equal(status.status, 0, status.stderr);
+    assert.match(status.stdout, /Claude Code: installed/);
+    assert.match(status.stdout, /OpenCode: installed/);
+    for (const source of ['claude', 'zcode']) {
+      assert.equal(runWithEnv(['config', 'add-root', source, claude], env).status, 1);
+    }
+    assert.equal(runWithEnv(['config', 'remove-root', 'claude-code', claude], env).status, 0);
+    assert.equal(runWithEnv(['config', 'remove-root', 'opencode', opencode], env).status, 0);
+    assert.deepEqual(JSON.parse(runWithEnv(['config', 'roots'], env).stdout), {});
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

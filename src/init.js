@@ -2,10 +2,11 @@ import { createInterface } from 'node:readline';
 import { execFile } from 'node:child_process';
 import { hostname as osHostname, platform } from 'node:os';
 import { loadConfig, saveConfig } from './config.js';
-import { ingest, requestDeviceCode, pollDeviceCode } from './api.js';
+import { fetchAccount, ingest, requestDeviceCode, pollDeviceCode } from './api.js';
 import { runSync } from './sync.js';
 import { detectInstalledTools } from './tools.js';
 import { bigHeader, success, failure, warn, arrow, link, dim, divider } from './output.js';
+import { manageDaemon, isDaemonInstalled, isDaemonPlatform } from './daemon-service.js';
 
 const CLIENT_NAME = 'vibe-usage CLI';
 
@@ -26,12 +27,8 @@ function openBrowser(url) {
   execFile(cmd, [url], () => {});
 }
 
-function isDaemonPlatform() {
-  return process.platform === 'linux' || process.platform === 'darwin' || process.platform === 'win32';
-}
-
 export async function runInit(options = {}) {
-  const { apiKey: providedKey, codexExtraHome } = options;
+  const { apiKey: providedKey, codexExtraHome, noDaemon = false } = options;
 
   console.log(bigHeader());
 
@@ -68,6 +65,13 @@ export async function runInit(options = {}) {
   try {
     await ingest(apiUrl, apiKey, []);
     console.log(success(`验证通过 ${dim(apiKey.slice(0, 12) + '...')}`));
+    // 说清楚数据会算在谁名下 —— 授权那一刻浏览器里登录的可能并不是他自己以为的
+    // 那个账号,而这是整条链路上最后一次能当场发现的机会。
+    const account = await fetchAccount(apiUrl, apiKey).catch(() => null);
+    if (account) {
+      console.log(success(`已链接到账号 ${account.name ? `@${account.handle}(${account.name})` : `@${account.handle}`}`));
+      console.log(dim('  数据都会记在这个账号名下;不是你要的账号就退出登录后重新 init。'));
+    }
   } catch (err) {
     if (err.message === 'UNAUTHORIZED') {
       console.error(failure('API Key 无效，请检查后重试。'));
@@ -101,22 +105,21 @@ export async function runInit(options = {}) {
 
   await runSync({ codexExtraHome });
 
-  if (isDaemonPlatform()) {
-    if (process.stdin.isTTY) {
-      console.log();
-      const answer = await prompt(`开启后台自动同步？${dim('(推荐)')} [Y/n] `);
-      const normalized = answer.toLowerCase();
-      if (normalized === '' || normalized === 'y' || normalized === 'yes') {
-        const { manageDaemon } = await import('./daemon-service.js');
-        await manageDaemon('install');
-      } else {
-        console.log();
-        console.log(dim('随时运行 `npx @vibe-cafe/vibe-usage daemon install` 开启后台同步。'));
-      }
-    } else {
-      console.log();
-      console.log(dim('提示: 运行 `npx @vibe-cafe/vibe-usage daemon install` 开启后台自动同步。'));
-    }
+  // Background sync is the default (maintainer decision 2026-09-09): one
+  // command should leave the machine fully set up. `--no-daemon` opts out;
+  // a non-interactive run (CI, headless --manual-key) never installs a
+  // service on a machine nobody is looking at.
+  console.log();
+  if (noDaemon) {
+    console.log(dim('已按 --no-daemon 跳过后台同步。随时运行 `npx @vibe-cafe/vibe-usage daemon install` 开启。'));
+  } else if (!isDaemonPlatform()) {
+    console.log(dim('当前平台不支持后台同步，之后手动运行 `npx @vibe-cafe/vibe-usage` 即可同步。'));
+  } else if (isDaemonInstalled()) {
+    console.log(success('后台自动同步已在运行。'));
+  } else if (process.stdin.isTTY) {
+    await manageDaemon('install');
+  } else {
+    console.log(dim('非交互环境未开启后台同步；运行 `npx @vibe-cafe/vibe-usage daemon install` 开启。'));
   }
 }
 
